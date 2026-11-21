@@ -86,18 +86,31 @@ pub struct Colors {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ColorOverrides {
+    #[serde(rename = "editor_bg", alias = "editor_background")]
     editor_background: Option<HexColor>,
+    #[serde(rename = "text_fg", alias = "foreground")]
     foreground: Option<HexColor>,
+    #[serde(rename = "selection_bg", alias = "selection")]
     selection: Option<HexColor>,
+    #[serde(rename = "surface_bg", alias = "muted_surface")]
     muted_surface: Option<HexColor>,
+    #[serde(rename = "terminal_bg", alias = "terminal_background")]
     terminal_background: Option<HexColor>,
+    #[serde(rename = "tab_bar_bg", alias = "tabs_background")]
     tabs_background: Option<HexColor>,
+    #[serde(rename = "tab_active_bg", alias = "active_tab_background")]
     active_tab_background: Option<HexColor>,
+    #[serde(rename = "tab_active_fg", alias = "tab_text_active")]
     tab_text_active: Option<HexColor>,
+    #[serde(rename = "tab_inactive_fg", alias = "tab_text_inactive")]
     tab_text_inactive: Option<HexColor>,
+    #[serde(rename = "status_bar_bg", alias = "status_background")]
     status_background: Option<HexColor>,
+    #[serde(rename = "decoration_accent_1", alias = "window_dot_red")]
     window_dot_red: Option<HexColor>,
+    #[serde(rename = "decoration_accent_2", alias = "window_dot_yellow")]
     window_dot_yellow: Option<HexColor>,
+    #[serde(rename = "decoration_accent_3", alias = "window_dot_green")]
     window_dot_green: Option<HexColor>,
 }
 
@@ -703,7 +716,7 @@ mod tests {
     #[test]
     fn palette_overrides_are_partial_and_theme_specific() {
         let config = Config::parse(
-            "[colors.dark]\neditor_background = '#12A0ef'\ntab_text_inactive = '#000000'\n[colors.light]\neditor_background = '#445566'",
+            "[colors.dark]\neditor_bg = '#12A0ef'\ntab_inactive_fg = '#000000'\n[colors.light]\neditor_bg = '#445566'",
         )
         .unwrap();
         let dark = config.colors.palette(Theme::Dark);
@@ -716,9 +729,53 @@ mod tests {
     }
 
     #[test]
+    fn renamed_color_options_accept_legacy_aliases() {
+        let fields = [
+            ("editor_background", "editor_bg"),
+            ("foreground", "text_fg"),
+            ("selection", "selection_bg"),
+            ("muted_surface", "surface_bg"),
+            ("terminal_background", "terminal_bg"),
+            ("tabs_background", "tab_bar_bg"),
+            ("active_tab_background", "tab_active_bg"),
+            ("tab_text_active", "tab_active_fg"),
+            ("tab_text_inactive", "tab_inactive_fg"),
+            ("status_background", "status_bar_bg"),
+            ("window_dot_red", "decoration_accent_1"),
+            ("window_dot_yellow", "decoration_accent_2"),
+            ("window_dot_green", "decoration_accent_3"),
+        ];
+        for (legacy, current) in fields {
+            let old = Config::parse(&format!("[colors.dark]\n{legacy} = '#123ABC'"))
+                .unwrap()
+                .palette();
+            let new = Config::parse(&format!("[colors.dark]\n{current} = '#123ABC'"))
+                .unwrap()
+                .palette();
+            assert_eq!(old.editor_background, new.editor_background, "{current}");
+            assert_eq!(old.foreground, new.foreground, "{current}");
+            assert_eq!(old.selection, new.selection, "{current}");
+            assert_eq!(old.muted_surface, new.muted_surface, "{current}");
+            assert_eq!(old.terminal_background, new.terminal_background, "{current}");
+            assert_eq!(old.tabs_background, new.tabs_background, "{current}");
+            assert_eq!(old.active_tab_background, new.active_tab_background, "{current}");
+            assert_eq!(old.tab_text_active, new.tab_text_active, "{current}");
+            assert_eq!(old.tab_text_inactive, new.tab_text_inactive, "{current}");
+            assert_eq!(old.status_background, new.status_background, "{current}");
+            assert_eq!(old.window_dot_red, new.window_dot_red, "{current}");
+            assert_eq!(old.window_dot_yellow, new.window_dot_yellow, "{current}");
+            assert_eq!(old.window_dot_green, new.window_dot_green, "{current}");
+            let both = format!(
+                "[colors.dark]\n{legacy} = '#123ABC'\n{current} = '#654321'"
+            );
+            assert!(Config::parse(&both).is_err(), "{legacy} and {current}");
+        }
+    }
+
+    #[test]
     fn invalid_hex_colors_are_rejected() {
         for color in ["'123456'", "'#12345'", "'#GG0000'", "'#12345678'", "42"] {
-            let source = format!("[colors.dark]\neditor_background = {color}");
+            let source = format!("[colors.dark]\neditor_bg = {color}");
             assert!(Config::parse(&source).is_err(), "{color}");
         }
         assert!(Config::parse("[colors.dark]\nunknown = '#010203'").is_err());
