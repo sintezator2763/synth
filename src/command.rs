@@ -46,13 +46,14 @@ pub enum Command {
     Find(String),
     FindNext,
     ToggleTerminal,
+    TerminalImage(OsString),
     ToggleFocus,
     ConfigPath,
     ConfigCheck,
     ConfigReload,
 }
 
-pub const USAGE: &str = "Usage: synth [open PATH | new | save | saveas PATH | close [-d|--discard] | properties | tab list|next|prev | find TEXT|next | terminal toggle | focus toggle | config path|check|reload]";
+pub const USAGE: &str = "Usage: synth [open PATH | new | save | saveas PATH | close [-d|--discard] | properties | tab list|next|prev | find TEXT|next | terminal toggle|image PATH | focus toggle | config path|check|reload]";
 
 impl Command {
     pub fn parse(args: &[OsString], directory: &Path) -> Result<Self, String> {
@@ -72,6 +73,9 @@ impl Command {
             (2, "find", text) if !text.is_empty() => Ok(Self::Find(text.into())),
             (3, "find", "--") if !word(2).is_empty() => Ok(Self::Find(word(2).into())),
             (2, "terminal", "toggle") => Ok(Self::ToggleTerminal),
+            (3, "terminal", "image") => Ok(Self::TerminalImage(
+                directory.join(&args[2]).into_os_string(),
+            )),
             (2, "focus", "toggle") => Ok(Self::ToggleFocus),
             (2, "config", "path") => Ok(Self::ConfigPath),
             (2, "config", "check") => Ok(Self::ConfigCheck),
@@ -91,7 +95,7 @@ pub struct Request {
 const MAX_FRAME: usize = 1024 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn receive<T: DeserializeOwned>(stream: &mut Stream) -> io::Result<T> {
+fn receive<T: DeserializeOwned>(stream: &mut impl Read) -> io::Result<T> {
     let mut size = [0; 4];
     stream.read_exact(&mut size)?;
     let size = u32::from_be_bytes(size) as usize;
@@ -106,7 +110,7 @@ fn receive<T: DeserializeOwned>(stream: &mut Stream) -> io::Result<T> {
     Ok(serde_json::from_slice(&data)?)
 }
 
-fn send<T: Serialize>(stream: &mut Stream, value: &T) -> io::Result<()> {
+fn send<T: Serialize>(stream: &mut impl Write, value: &T) -> io::Result<()> {
     let data = serde_json::to_vec(value)?;
     if data.len() > MAX_FRAME {
         return Err(io::Error::new(
@@ -154,10 +158,8 @@ pub fn dispatch(installation: &Path, command: &Command) -> Reply {
 fn exchange(stream: &mut Stream, command: &Command) -> io::Result<Reply> {
     #[cfg(unix)]
     check_peer(stream)?;
-    stream.set_recv_timeout(Some(COMMAND_TIMEOUT + Duration::from_secs(1)))?;
-    stream.set_send_timeout(Some(Duration::from_secs(1)))?;
-    send(stream, command)?;
-    receive(stream)
+    write_frame(stream, command)?;
+    read_frame(stream, COMMAND_TIMEOUT + Duration::from_secs(1))
 }
 
 pub fn listen(installation: &Path, ctx: egui::Context) -> io::Result<mpsc::Receiver<Request>> {
@@ -194,9 +196,7 @@ fn handle_request(
 ) -> io::Result<()> {
     #[cfg(unix)]
     check_peer(stream)?;
-    stream.set_recv_timeout(Some(Duration::from_millis(500)))?;
-    stream.set_send_timeout(Some(Duration::from_secs(1)))?;
-    let command = receive(stream)?;
+    let command = read_frame(stream, Duration::from_millis(500))?;
     let (respond, response) = mpsc::sync_channel(1);
     sender
         .send(Request { command, respond })
@@ -205,5 +205,156 @@ fn handle_request(
     let reply = response
         .recv_timeout(COMMAND_TIMEOUT)
         .unwrap_or_else(|_| Err("Synth did not complete the command in time".into()));
-    send(stream, &reply)
+    write_frame(stream, &reply)
+}
+
+fn read_frame<T: DeserializeOwned>(stream: &mut Stream, timeout: Duration) -> io::Result<T> {
+    #[cfg(unix)]
+    {
+        stream.set_recv_timeout(Some(timeout))?;
+        receive(stream)
+    }
+    #[cfg(windows)]
+    {
+        stream.set_nonblocking(true)?;
+        receive(&mut PipeIo {
+            stream,
+            deadline: std::time::Instant::now() + timeout,
+        })
+    }
+}
+
+fn write_frame<T: Serialize>(stream: &mut Stream, value: &T) -> io::Result<()> {
+    let timeout = Duration::from_secs(1);
+    #[cfg(unix)]
+    {
+        stream.set_send_timeout(Some(timeout))?;
+        send(stream, value)
+    }
+    #[cfg(windows)]
+    {
+        stream.set_nonblocking(true)?;
+        send(
+            &mut PipeIo {
+                stream,
+                deadline: std::time::Instant::now() + timeout,
+            },
+            value,
+        )
+    }
+}
+
+#[cfg(windows)]
+struct PipeIo<'a> {
+    stream: &'a mut Stream,
+    deadline: std::time::Instant,
+}
+
+#[cfg(windows)]
+impl PipeIo<'_> {
+    fn retry(
+        &mut self,
+        mut operation: impl FnMut(&mut Stream) -> io::Result<usize>,
+    ) -> io::Result<usize> {
+        loop {
+            match operation(self.stream) {
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        || error.raw_os_error()
+                            == Some(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32) => {}
+                result => return result,
+            }
+            let remaining = self
+                .deadline
+                .saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(5)));
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Read for PipeIo<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        self.retry(|stream| {
+            let Stream::NamedPipe(pipe) = &*stream;
+            let mut available = 0;
+            let ok = unsafe {
+                PeekNamedPipe(
+                    pipe.as_raw_handle(),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut available,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if available == 0 {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            let size = buffer.len().min(available as usize);
+            stream.read(&mut buffer[..size])
+        })
+    }
+}
+
+#[cfg(windows)]
+impl Write for PipeIo<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.retry(|stream| match stream.write(buffer) {
+            Ok(0) if !buffer.is_empty() => Err(io::ErrorKind::WouldBlock.into()),
+            result => result,
+        })
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unicode_open_and_close_round_trip_over_local_transport() {
+        let directory = tempfile::tempdir().unwrap();
+        let installation = directory.path().join("synth");
+        let path = directory.path().join("фаел.txt").into_os_string();
+        let requests = listen(&installation, egui::Context::default()).unwrap();
+        let server = std::thread::spawn(move || {
+            let request = requests.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert!(matches!(request.command, Command::Open(opened) if opened == path));
+            request.respond.send(Ok("Открыт".into())).unwrap();
+            let request = requests.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert!(matches!(request.command, Command::Close { discard: true }));
+            request
+                .respond
+                .send(Err("Expected error reply".into()))
+                .unwrap();
+        });
+        assert_eq!(
+            dispatch(
+                &installation,
+                &Command::Open(directory.path().join("фаел.txt").into_os_string())
+            ),
+            Ok("Открыт".into())
+        );
+        assert_eq!(
+            dispatch(&installation, &Command::Close { discard: true }),
+            Err("Expected error reply".into())
+        );
+        server.join().unwrap();
+    }
 }

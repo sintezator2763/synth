@@ -1,6 +1,6 @@
 use std::{
     env, io,
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
 };
 
 use alacritty_terminal::{
@@ -12,20 +12,51 @@ use alacritty_terminal::{
     sync::FairMutex,
     term::{self, Term, TermMode, cell::Flags},
     tty,
-    vte::ansi::{Color, CursorShape, NamedColor, Rgb},
+    vte::ansi::{Color, CursorShape, Handler, NamedColor, Rgb},
 };
 use eframe::egui::{self, Align2, Color32, FontId, Key, Modifiers, Rect, Sense, Stroke, Vec2};
 
-use crate::config::Terminal as Settings;
+use crate::{
+    config::Terminal as Settings,
+    graphics::{self, Graphics, GraphicsPty, Position, Transfer},
+};
+
+type GraphicEvent = (Transfer, (usize, usize));
+
+struct GraphicsEvents {
+    reports: mpsc::SyncSender<GraphicEvent>,
+    packets: mpsc::Receiver<Transfer>,
+    awaiting_position: bool,
+}
 
 #[derive(Clone)]
 struct EventProxy {
     events: mpsc::Sender<Event>,
     ctx: egui::Context,
+    graphics: Arc<Mutex<GraphicsEvents>>,
 }
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
+        if let Ok(mut graphics) = self.graphics.lock() {
+            match &event {
+                Event::Title(title) if title == graphics::MARKER => {
+                    graphics.awaiting_position = true;
+                    return;
+                }
+                Event::PtyWrite(text) if graphics.awaiting_position => {
+                    graphics.awaiting_position = false;
+                    if let Some(position) = graphics::reported_position(text)
+                        && let Ok(packet) = graphics.packets.try_recv()
+                    {
+                        let _ = graphics.reports.try_send((packet, position));
+                        self.ctx.request_repaint();
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
         if !matches!(event, Event::Wakeup | Event::MouseCursorDirty) {
             let _ = self.events.send(event);
         }
@@ -73,6 +104,8 @@ pub struct Terminal {
     term: Arc<FairMutex<Term<EventProxy>>>,
     sender: EventLoopSender,
     events: mpsc::Receiver<Event>,
+    graphic_events: mpsc::Receiver<GraphicEvent>,
+    graphics: Graphics,
     size: WindowSize,
     font: FontId,
 }
@@ -112,9 +145,10 @@ impl Terminal {
                 let mut args = vec!["/D".into()];
                 if executable_path.is_some() {
                     options.escape_args = false;
-                    options
-                        .env
-                        .insert("SYNTH_CMD".into(), r#""%SYNTH_EXE%""#.into());
+                    options.env.insert(
+                        "SYNTH_CMD".into(),
+                        r#"start "" /b /wait "%SYNTH_EXE%""#.into(),
+                    );
                     args.extend(["/K", "doskey synth=%SYNTH_CMD% $*"].map(str::to_owned));
                 }
                 options.shell = Some(tty::Shell::new("cmd.exe".into(), args));
@@ -130,16 +164,27 @@ impl Terminal {
         }
 
         let (tx, events) = mpsc::channel();
+        let (packets_sender, packets) = mpsc::sync_channel(8);
+        let (reports, graphic_events) = mpsc::sync_channel(8);
         let proxy = EventProxy {
             events: tx,
             ctx: ui.ctx().clone(),
+            graphics: Arc::new(Mutex::new(GraphicsEvents {
+                reports,
+                packets,
+                awaiting_position: false,
+            })),
         };
         let term = Arc::new(FairMutex::new(Term::new(
-            term::Config::default(),
+            term::Config {
+                kitty_keyboard: true,
+                ..Default::default()
+            },
             &grid,
             proxy.clone(),
         )));
         let pty = tty::new(&options, size, 0)?;
+        let pty = GraphicsPty::new(pty, packets_sender);
         let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)?;
         let sender = event_loop.channel();
         event_loop.spawn();
@@ -147,9 +192,40 @@ impl Terminal {
             term,
             sender,
             events,
+            graphic_events,
+            graphics: Graphics::default(),
             size,
             font,
         })
+    }
+
+    pub fn show_image(
+        &mut self,
+        ctx: &egui::Context,
+        path: &std::path::Path,
+    ) -> Result<String, String> {
+        let cell = egui::vec2(
+            f32::from(self.size.cell_width),
+            f32::from(self.size.cell_height),
+        );
+        let mut term = self.term.lock();
+        let cursor = term.grid().cursor.point;
+        let position = Position {
+            row: term.grid().history_size() as i64 + i64::from(cursor.line.0),
+            column: cursor.column.0,
+            alternate: term.mode().contains(TermMode::ALT_SCREEN),
+        };
+        let room = egui::vec2(
+            (term.columns().saturating_sub(position.column)).max(1) as f32,
+            term.screen_lines().saturating_sub(1).max(1) as f32,
+        );
+        let rows = self.graphics.show_file(ctx, path, position, cell, room)?;
+        for _ in 0..rows {
+            term.linefeed();
+        }
+        term.carriage_return();
+        ctx.request_repaint();
+        Ok(format!("Displayed {}", path.display()))
     }
 
     pub fn set_font_size(&mut self, size: f32) {
@@ -206,6 +282,19 @@ impl Terminal {
             }
         }
 
+        for (packet, (row, column)) in self.graphic_events.try_iter() {
+            let position = {
+                let term = self.term.lock();
+                Position {
+                    row: (term.grid().history_size() + row) as i64,
+                    column,
+                    alternate: term.mode().contains(TermMode::ALT_SCREEN),
+                }
+            };
+            if let Some(reply) = self.graphics.receive(ui.ctx(), packet, position) {
+                self.write(reply);
+            }
+        }
         let response = ui.interact(
             rect.intersect(ui.clip_rect()),
             Self::focus_id(),
@@ -244,7 +333,11 @@ impl Terminal {
 
     fn keyboard_input(&self, ui: &egui::Ui) {
         let mode = *self.term.lock().mode();
-        for event in ui.input(|input| input.events.clone()) {
+        let mut events = ui
+            .input(|input| input.events.clone())
+            .into_iter()
+            .peekable();
+        while let Some(event) = events.next() {
             match event {
                 egui::Event::Text(text) => self.write(text),
                 egui::Event::Ime(egui::ImeEvent::Commit(text)) => self.write(text),
@@ -270,15 +363,35 @@ impl Terminal {
                 egui::Event::Cut if !cfg!(target_os = "macos") => self.write(b"\x18"),
                 egui::Event::Key {
                     key,
-                    pressed: true,
+                    physical_key,
+                    pressed,
+                    repeat,
                     modifiers,
-                    ..
                 } => {
-                    if key == Key::C && modifiers.ctrl && modifiers.shift {
+                    let associated = match events.peek() {
+                        Some(egui::Event::Text(text)) if pressed => Some(text.as_str()),
+                        _ => None,
+                    };
+                    if let Some(sequence) = kitty_key(
+                        KeyStroke {
+                            key,
+                            physical_key,
+                            pressed,
+                            repeat,
+                            modifiers,
+                            associated,
+                        },
+                        mode,
+                    ) {
+                        if associated.is_some() {
+                            events.next();
+                        }
+                        self.write(sequence);
+                    } else if pressed && key == Key::C && modifiers.ctrl && modifiers.shift {
                         if let Some(text) = self.term.lock().selection_to_string() {
                             ui.ctx().copy_text(text);
                         }
-                    } else if let Some(bytes) = key_bytes(key, modifiers, mode) {
+                    } else if pressed && let Some(bytes) = key_bytes(key, modifiers, mode) {
                         self.write(bytes);
                     }
                 }
@@ -357,6 +470,12 @@ impl Terminal {
         let term = self.term.lock();
         let content = term.renderable_content();
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+        let origin = Position {
+            row: term.grid().history_size() as i64 - content.display_offset as i64,
+            column: 0,
+            alternate: term.mode().contains(TermMode::ALT_SCREEN),
+        };
+        self.graphics.draw(&painter, rect, cell, origin, true);
         for entry in content.display_iter {
             let flags = entry.flags;
             if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
@@ -452,6 +571,7 @@ impl Terminal {
                 painter.hline(bounds.x_range(), y, Stroke::new(1.0_f32, fg));
             }
         }
+        self.graphics.draw(&painter, rect, cell, origin, false);
     }
 }
 
@@ -513,6 +633,139 @@ fn palette(index: usize, foreground: Color32, background: Color32) -> Color32 {
         index if index == NamedColor::Background as usize => background,
         _ => foreground,
     }
+}
+
+struct KeyStroke<'a> {
+    key: Key,
+    physical_key: Option<Key>,
+    pressed: bool,
+    repeat: bool,
+    modifiers: Modifiers,
+    associated: Option<&'a str>,
+}
+
+fn printable_key(key: Key) -> Option<char> {
+    if key == Key::Space {
+        return Some(' ');
+    }
+    let mut chars = key.symbol_or_name().chars();
+    let character = chars.next()?;
+    chars
+        .next()
+        .is_none()
+        .then_some(character.to_ascii_lowercase())
+}
+
+fn kitty_key(stroke: KeyStroke<'_>, mode: TermMode) -> Option<String> {
+    if !mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL) {
+        return None;
+    }
+    let KeyStroke {
+        key,
+        physical_key,
+        pressed,
+        repeat,
+        modifiers,
+        associated,
+    } = stroke;
+    let all = mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
+    let report_events = mode.contains(TermMode::REPORT_EVENT_TYPES);
+    if !pressed
+        && (!report_events || (!all && matches!(key, Key::Enter | Key::Tab | Key::Backspace)))
+    {
+        return None;
+    }
+    let printable = printable_key(key);
+    if !all && printable.is_some() && !modifiers.ctrl && !modifiers.alt && !modifiers.mac_cmd {
+        return None;
+    }
+    let function = match key {
+        Key::ArrowUp => Some((1, 'A')),
+        Key::ArrowDown => Some((1, 'B')),
+        Key::ArrowRight => Some((1, 'C')),
+        Key::ArrowLeft => Some((1, 'D')),
+        Key::Home => Some((1, 'H')),
+        Key::End => Some((1, 'F')),
+        Key::Insert => Some((2, '~')),
+        Key::Delete => Some((3, '~')),
+        Key::PageUp => Some((5, '~')),
+        Key::PageDown => Some((6, '~')),
+        Key::F1 => Some((11, '~')),
+        Key::F2 => Some((12, '~')),
+        Key::F3 => Some((13, '~')),
+        Key::F4 => Some((14, '~')),
+        Key::F5 => Some((15, '~')),
+        Key::F6 => Some((17, '~')),
+        Key::F7 => Some((18, '~')),
+        Key::F8 => Some((19, '~')),
+        Key::F9 => Some((20, '~')),
+        Key::F10 => Some((21, '~')),
+        Key::F11 => Some((23, '~')),
+        Key::F12 => Some((24, '~')),
+        _ => None,
+    };
+    let (code, terminator) = if let Some(value) = function {
+        value
+    } else {
+        let code = match key {
+            Key::Escape => 27,
+            Key::Enter | Key::Tab | Key::Backspace if !all && modifiers.is_none() => return None,
+            Key::Enter => 13,
+            Key::Tab => 9,
+            Key::Backspace => 127,
+            _ => u32::from(printable?),
+        };
+        (code, 'u')
+    };
+    let modifier = 1
+        + u8::from(modifiers.shift)
+        + 2 * u8::from(modifiers.alt)
+        + 4 * u8::from(modifiers.ctrl)
+        + 8 * u8::from(modifiers.mac_cmd);
+    let mut sequence = format!("\x1b[{code}");
+    if printable.is_some() && mode.contains(TermMode::REPORT_ALTERNATE_KEYS) {
+        let shifted = associated.and_then(|text| {
+            let mut chars = text.chars();
+            let character = chars.next()?;
+            (modifiers.shift && chars.next().is_none()).then_some(character)
+        });
+        let physical = physical_key
+            .and_then(printable_key)
+            .filter(|key| Some(*key) != printable);
+        if let Some(shifted) = shifted {
+            sequence.push_str(&format!(":{}", u32::from(shifted)));
+        } else if physical.is_some() {
+            sequence.push(':');
+        }
+        if let Some(physical) = physical {
+            sequence.push_str(&format!(":{}", u32::from(physical)));
+        }
+    }
+    sequence.push_str(&format!(";{modifier}"));
+    if report_events {
+        let kind = if !pressed {
+            3
+        } else if repeat {
+            2
+        } else {
+            1
+        };
+        sequence.push_str(&format!(":{kind}"));
+    }
+    if mode.contains(TermMode::REPORT_ASSOCIATED_TEXT)
+        && let Some(text) = associated
+    {
+        sequence.push(';');
+        sequence.push_str(
+            &text
+                .chars()
+                .map(|character| u32::from(character).to_string())
+                .collect::<Vec<_>>()
+                .join(":"),
+        );
+    }
+    sequence.push(terminator);
+    Some(sequence)
 }
 
 fn key_bytes(key: Key, modifiers: Modifiers, mode: TermMode) -> Option<Vec<u8>> {

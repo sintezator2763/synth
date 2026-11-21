@@ -1137,6 +1137,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2557,10 +2559,14 @@ name = "synth"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "base64",
  "eframe",
+ "flate2",
+ "image",
  "interprocess",
  "libc",
  "notify",
+ "polling",
  "serde",
  "serde_json",
  "shell-words",

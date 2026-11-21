@@ -5,6 +5,7 @@ mod command;
 mod config;
 mod document;
 mod editor;
+mod graphics;
 mod terminal;
 
 use std::{
@@ -44,8 +45,10 @@ struct Synth {
 }
 
 impl Synth {
-    fn new(ctx: &egui::Context, installation: PathBuf) -> Self {
-        let config_path = Config::path(&installation);
+    fn new(ctx: &egui::Context, installation: PathBuf, config_path: PathBuf) -> Self {
+        let setup_error = Config::ensure_file(&config_path, &installation)
+            .err()
+            .map(|error| format!("Could not create {}: {error}", config_path.display()));
         let (watcher, watch_error) = match ConfigWatch::new(&config_path, ctx.clone()) {
             Ok(watcher) => (Some(watcher), None),
             Err(error) => (None, Some(format!("Config watcher: {error}"))),
@@ -66,7 +69,7 @@ impl Synth {
             terminal_open: false,
             terminal_error: None,
             config_error: None,
-            notice: watch_error,
+            notice: setup_error.or(watch_error),
             pending_focus: Some(Focus::Editor),
         };
         app.bindings = app.config.bindings(&app.config_path).unwrap_or_default();
@@ -128,6 +131,14 @@ impl Synth {
             Command::PreviousTab => Ok(self.documents.switch(false)),
             Command::Find(query) => self.find(Some(query)),
             Command::FindNext => self.find(None),
+            Command::TerminalImage(path) => {
+                let terminal = self
+                    .terminal
+                    .as_mut()
+                    .filter(|_| self.terminal_open)
+                    .ok_or("Open the terminal first with synth terminal toggle")?;
+                terminal.show_image(ctx, Path::new(&path))
+            }
             Command::ToggleTerminal => {
                 self.toggle_terminal();
                 Ok(String::new())
@@ -316,6 +327,12 @@ impl eframe::App for Synth {
 }
 
 fn check_config(path: &Path) -> Reply {
+    if !path.try_exists().map_err(|error| error.to_string())? {
+        return Err(format!(
+            "Config not found: {}. Launch Synth to create it.",
+            path.display()
+        ));
+    }
     Config::load(path)?;
     Ok(format!("Config OK: {}", path.display()))
 }
@@ -333,7 +350,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", command::USAGE);
             return Ok(());
         }
-        let config_path = Config::path(&installation);
+        let config_path = Config::path(&installation)?;
         let command = Command::parse(&args, &env::current_dir()?)?;
         let reply = match command {
             Command::ConfigPath => Ok(config_path.display().to_string()),
@@ -347,11 +364,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let installation = config::installation_path()?;
 
+    let config_path = Config::path(&installation)?;
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../packaging/synth.png"))?;
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("synth")
             .with_icon(icon)
+            .with_maximized(cfg!(windows))
             .with_inner_size([1040.0, 680.0])
             .with_min_inner_size([480.0, 300.0]),
         ..Default::default()
@@ -359,7 +378,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "Synth",
         native,
-        Box::new(move |cc| Ok(Box::new(Synth::new(&cc.egui_ctx, installation)))),
+        Box::new(move |cc| {
+            Ok(Box::new(Synth::new(
+                &cc.egui_ctx,
+                installation,
+                config_path,
+            )))
+        }),
     )?;
     Ok(())
 }

@@ -94,7 +94,7 @@ pub struct Terminal {
     pub width_fraction: f32,
     animation_ms: Option<u16>,
     pub font_size: f32,
-    pub toggle_key: String,
+    pub toggle_key: Option<String>,
     pub shell: Option<String>,
     pub args: Vec<String>,
 }
@@ -106,7 +106,7 @@ impl Default for Terminal {
             width_fraction: 0.44,
             animation_ms: None,
             font_size: 14.0,
-            toggle_key: "Esc".into(),
+            toggle_key: None,
             shell: None,
             args: Vec::new(),
         }
@@ -115,10 +115,11 @@ impl Default for Terminal {
 
 impl Terminal {
     pub fn shortcut(&self) -> Result<Option<egui::KeyboardShortcut>, String> {
-        if self.toggle_key.trim().is_empty() {
-            return Ok(None);
-        }
-        parse_shortcut(&self.toggle_key).map(Some)
+        self.toggle_key
+            .as_deref()
+            .filter(|key| !key.trim().is_empty())
+            .map(parse_shortcut)
+            .transpose()
     }
 }
 
@@ -272,9 +273,61 @@ pub fn installation_path() -> io::Result<PathBuf> {
     Ok(executable)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn user_home() -> io::Result<PathBuf> {
+    env::home_dir()
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| io::Error::other("Home directory is unavailable"))
+}
+
 impl Config {
-    pub fn path(installation: &Path) -> PathBuf {
-        installation.with_file_name("config.toml")
+    pub fn path(_installation: &Path) -> io::Result<PathBuf> {
+        #[cfg(windows)]
+        return Ok(_installation.with_file_name("config.toml"));
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(directory) = env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+            {
+                return Ok(directory.join("synth/config.toml"));
+            }
+            Ok(user_home()?.join(".config/synth/config.toml"))
+        }
+
+        #[cfg(target_os = "macos")]
+        Ok(user_home()?.join("Library/Application Support/Synth/config.toml"))
+    }
+
+    pub fn ensure_file(path: &Path, installation: &Path) -> io::Result<()> {
+        use std::io::Write;
+
+        if fs::symlink_metadata(path).is_ok() {
+            return Ok(());
+        }
+        let directory = path
+            .parent()
+            .ok_or_else(|| io::Error::other("Config has no parent directory"))?;
+        fs::create_dir_all(directory)?;
+        let legacy = installation.with_file_name("config.toml");
+        let default = include_bytes!("../config.toml");
+        let contents = if legacy != path {
+            match fs::read(legacy) {
+                Ok(contents) => contents,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => default.to_vec(),
+                Err(error) => return Err(error),
+            }
+        } else {
+            default.to_vec()
+        };
+        let mut output = tempfile::NamedTempFile::new_in(directory)?;
+        output.write_all(&contents)?;
+        match output.persist_noclobber(path) {
+            Ok(_) => Ok(()),
+            Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error.error),
+        }
     }
 
     pub fn load(path: &Path) -> Result<(Self, Bindings), String> {
@@ -380,12 +433,30 @@ mod tests {
         let config = Config::parse(include_str!("../config.toml")).unwrap();
         assert!(matches!(config.terminal.side, Side::Right));
         assert_eq!(
-            config.terminal.shortcut().unwrap(),
+            config
+                .bindings(Path::new("/tmp/config.toml"))
+                .unwrap()
+                .first()
+                .map(|binding| binding.0),
             Some(egui::KeyboardShortcut::new(
                 egui::Modifiers::NONE,
                 egui::Key::Escape
             ))
         );
+    }
+
+    #[test]
+    fn first_launch_materializes_bindings_and_leaves_user_changes_intact() {
+        let workspace = tempfile::tempdir().unwrap();
+        let installation = workspace.path().join("synth");
+        let path = workspace.path().join("settings/config.toml");
+        assert!(Config::load(&path).unwrap().1.is_empty());
+
+        Config::ensure_file(&path, &installation).unwrap();
+        assert_eq!(Config::load(&path).unwrap().1.len(), 1);
+        fs::write(&path, "[keybindings]").unwrap();
+        Config::ensure_file(&path, &installation).unwrap();
+        assert!(Config::load(&path).unwrap().1.is_empty());
     }
 
     #[test]

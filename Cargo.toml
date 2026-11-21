@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 alacritty_terminal = "0.25.1"
+base64 = "0.22"
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+polling = "3"
 eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 interprocess = "2.4.9"
 notify = "8.2"
@@ -23,7 +27,7 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 widestring = "1"
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Pipes"] }
 
 [profile.release]
 lto = "thin"
