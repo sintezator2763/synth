@@ -278,7 +278,7 @@ impl PipeIo<'_> {
 #[cfg(windows)]
 impl Read for PipeIo<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::io::{AsHandle, AsRawHandle};
         use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 
         if buffer.is_empty() {
@@ -289,7 +289,7 @@ impl Read for PipeIo<'_> {
             let mut available = 0;
             let ok = unsafe {
                 PeekNamedPipe(
-                    pipe.as_raw_handle(),
+                    pipe.as_handle().as_raw_handle(),
                     std::ptr::null_mut(),
                     0,
                     std::ptr::null_mut(),
