@@ -3,11 +3,13 @@ set -euo pipefail
 
 version=$1
 output=$2
+root=$(cd "$(dirname "$0")" && pwd)
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 app="$stage/Synth.app"
 
-mkdir -p "$app/Contents/MacOS" "$(dirname "$output")"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$(dirname "$output")"
+install -m 644 "$root/synth.icns" "$app/Contents/Resources/synth.icns"
 lipo -create \
     target/aarch64-apple-darwin/release/synth \
     target/x86_64-apple-darwin/release/synth \
@@ -21,6 +23,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <dict>
     <key>CFBundleExecutable</key><string>synth</string>
     <key>CFBundleIdentifier</key><string>com.sintezator2763.synth</string>
+    <key>CFBundleIconFile</key><string>synth.icns</string>
     <key>CFBundleName</key><string>Synth</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$version</string>

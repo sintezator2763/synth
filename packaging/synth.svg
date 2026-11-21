@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Synth</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#32223D"/>
+      <stop offset="1" stop-color="#191323"/>
+    </linearGradient>
+    <linearGradient id="ribbon" x1="0" y1="0" x2=".85" y2="1">
+      <stop stop-color="#FFC09D"/>
+      <stop offset=".65" stop-color="#FF8369"/>
+      <stop offset="1" stop-color="#F45C80"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#tile)"/>
+
+  <!-- The diagonal cut in the upper stroke is shared with the sliding tab. -->
+  <path fill="url(#ribbon)"
+        d="M167 53 151 89H95c-6 0-11 5-11 11 0 4 2 7 5 9l84 24c16 5 27 18 27 35
+           0 23-19 42-42 42H42l18-36h94c5 0 9-4 9-9 0-4-3-7-6-8l-84-24
+           c-17-5-27-18-27-35 0-25 20-45 45-45Z"/>
+  <path fill="#FFD2AD" d="M177 45h28a9 9 0 0 1 8 13l-11 23h-41Z"/>
+</svg>

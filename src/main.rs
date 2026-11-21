@@ -192,9 +192,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Usage: synth [terminal toggle]".into());
     }
 
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../packaging/synth.png"))?;
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("synth")
+            .with_icon(icon)
             .with_inner_size([1040.0, 680.0])
             .with_min_inner_size([480.0, 300.0]),
         ..Default::default()
