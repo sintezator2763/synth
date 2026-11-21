@@ -2,10 +2,41 @@
 theme = "dark"
 font_size = 16.0
 
+[interface]
+enable_tabs = false
+enable_line_numbers = false
+enable_syntax_highlighting = false
+enable_status_bar = false
+
 [terminal]
 side = "right"
 width_fraction = 0.44
-animation_ms = 180
 font_size = 14.0
-toggle_key = "Esc"
 args = []
+
+[keybindings]
+Esc = "synth terminal toggle"
+
+[animations]
+enabled = true
+
+[animations.terminal]
+open_ms = 180
+close_ms = 140
+direction = "out"
+style = "quadratic"
+
+[animations.tabs]
+duration_ms = 120
+direction = "out"
+style = "quadratic"
+
+[animations.line_numbers]
+duration_ms = 120
+direction = "out"
+style = "quadratic"
+
+[animations.status_bar]
+duration_ms = 100
+direction = "out"
+style = "linear"

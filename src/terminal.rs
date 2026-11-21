@@ -152,6 +152,14 @@ impl Terminal {
         })
     }
 
+    pub fn set_font_size(&mut self, size: f32) {
+        self.font.size = size;
+    }
+
+    pub fn focus_id() -> egui::Id {
+        egui::Id::new("terminal input")
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -200,7 +208,7 @@ impl Terminal {
 
         let response = ui.interact(
             rect.intersect(ui.clip_rect()),
-            ui.id().with("pty"),
+            Self::focus_id(),
             Sense::click_and_drag(),
         );
         if interactive && (request_focus || response.clicked() || response.drag_started()) {
