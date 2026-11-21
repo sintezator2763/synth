@@ -25,11 +25,19 @@ jobs:
           import tomllib
 
           with open("Cargo.toml", "rb") as manifest:
-              version = tomllib.load(manifest)["package"]["version"]
-          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+              base_version = tomllib.load(manifest)["package"]["version"]
+          if os.environ["GITHUB_REF_TYPE"] == "tag":
+              tag = os.environ["GITHUB_REF_NAME"]
+              if not tag.startswith("v"):
+                  raise SystemExit("Release tags must start with v")
+              version = tag[1:]
+          else:
+              series = base_version.rsplit(".", 1)[0]
+              version = f'{series}.{os.environ["GITHUB_RUN_NUMBER"]}'
+          if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
               raise SystemExit("Expected a numeric major.minor.patch version")
-          if os.environ["GITHUB_REF_TYPE"] == "tag" and os.environ["GITHUB_REF_NAME"] != f"v{version}":
-              raise SystemExit(f"Release tag must be v{version}")
+          if any(int(part) > 65535 for part in version.split(".")):
+              raise SystemExit("Version components must fit in a Windows executable version")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(f"number={version}", file=output)
 
@@ -70,7 +78,12 @@ jobs:
           cargo build --locked --release --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Force dist
-          Copy-Item target/x86_64-pc-windows-msvc/release/synth.exe dist/synth.exe
+          $output = "dist/Synth-${env:SYNTH_VERSION}-windows-x64-portable.exe"
+          Copy-Item target/x86_64-pc-windows-msvc/release/synth.exe $output
+          $version = (Get-Item $output).VersionInfo
+          if ($version.FileVersion -ne $env:SYNTH_VERSION -or $version.ProductVersion -ne $env:SYNTH_VERSION) {
+            throw "Unexpected EXE version. File: $($version.FileVersion), product: $($version.ProductVersion)"
+          }
       - name: Build macOS DMG
         if: matrix.platform == 'macos'
         run: |
@@ -89,12 +102,24 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     needs: [version, build]
     permissions:
       contents: write
     runs-on: ubuntu-24.04
+    env:
+      SYNTH_VERSION: ${{ needs.version.outputs.number }}
     steps:
+      - uses: actions/checkout@v4
+      - name: Verify release tag
+        run: |
+          ref="refs/tags/v$SYNTH_VERSION"
+          remote_tags=$(git ls-remote origin "$ref" "$ref^{}")
+          tagged_commit=$(awk '$2 ~ /\^\{\}$/ {peeled=$1} {tag=$1} END {print peeled ? peeled : tag}' <<< "$remote_tags")
+          if [[ -n "$tagged_commit" && "$tagged_commit" != "$(git rev-parse HEAD)" ]]; then
+            echo "::error::Tag v$SYNTH_VERSION already points to a different commit."
+            exit 1
+          fi
       - uses: actions/download-artifact@v4
         with:
           pattern: Synth-*
@@ -102,11 +127,14 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ needs.version.outputs.number }}
+          target_commitish: ${{ github.sha }}
           name: Synth v${{ needs.version.outputs.number }}
           body: Автосборка.
           generate_release_notes: false
           fail_on_unmatched_files: true
+          make_latest: legacy
           files: |
-            dist/synth.exe
-            dist/*.dmg
-            dist/*.AppImage
+            dist/Synth-${{ needs.version.outputs.number }}-windows-x64-portable.exe
+            dist/Synth-${{ needs.version.outputs.number }}-macos-universal.dmg
+            dist/Synth-${{ needs.version.outputs.number }}-linux-x86_64.AppImage

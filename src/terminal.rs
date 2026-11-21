@@ -87,7 +87,8 @@ impl Terminal {
         let mut options = tty::Options::default();
         options.env.insert("TERM".into(), "xterm-256color".into());
         options.env.insert("COLORTERM".into(), "truecolor".into());
-        if let Some(dir) = env::current_exe()?.parent() {
+        let executable = env::current_exe()?;
+        if let Some(dir) = executable.parent() {
             let paths = std::iter::once(dir.to_path_buf())
                 .chain(env::var_os("PATH").iter().flat_map(env::split_paths))
                 .collect::<Vec<_>>();
@@ -103,8 +104,20 @@ impl Terminal {
         #[cfg(windows)]
         {
             options.escape_args = true;
+            let executable_path = executable.to_str();
+            if let Some(path) = executable_path {
+                options.env.insert("SYNTH_EXE".into(), path.into());
+            }
             if options.shell.is_none() {
-                options.shell = Some(tty::Shell::new("cmd.exe".into(), vec!["/D".into()]));
+                let mut args = vec!["/D".into()];
+                if executable_path.is_some() {
+                    options.escape_args = false;
+                    options
+                        .env
+                        .insert("SYNTH_CMD".into(), r#""%SYNTH_EXE%""#.into());
+                    args.extend(["/K", "doskey synth=%SYNTH_CMD% $*"].map(str::to_owned));
+                }
+                options.shell = Some(tty::Shell::new("cmd.exe".into(), args));
             }
         }
         #[cfg(not(windows))]
