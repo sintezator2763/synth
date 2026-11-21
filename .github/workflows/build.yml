@@ -105,12 +105,26 @@ jobs:
           New-Item -ItemType Directory -Force $directory | Out-Null
           $executable = Join-Path $directory synth.exe
           Copy-Item "dist/Synth-${env:SYNTH_VERSION}-windows-x64-portable.exe" $executable
-          $process = Start-Process -FilePath $executable -PassThru
+          $archive = Join-Path $directory mesa.7z
+          Invoke-WebRequest -Uri "https://github.com/pal1000/mesa-dist-win/releases/download/26.3.0/mesa3d-26.3.0-release-msvc.7z" -OutFile $archive
+          $expected = "C505FCC77E8F63A09D7DDAC086591D2F542C0698D37FC9E3094685A34D0D9991"
+          if ((Get-FileHash -Path $archive -Algorithm SHA256).Hash -ne $expected) {
+            throw "Unexpected Mesa archive checksum"
+          }
+          $sevenZip = Join-Path $env:ProgramFiles "7-Zip/7z.exe"
+          & $sevenZip e $archive "-o$directory" "x64/opengl32.dll" "x64/libgallium_wgl.dll" "x64/libEGL.dll" "x64/libGLESv2.dll" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not extract the test renderer"
+          }
+          $env:GALLIUM_DRIVER = "llvmpipe"
+          $stderr = Join-Path $directory synth-stderr.log
+          $process = Start-Process -FilePath $executable -WorkingDirectory $directory -RedirectStandardError $stderr -PassThru
           try {
             $verified = $false
             for ($i = 0; $i -lt 50; $i++) {
               $process.Refresh()
               if ($process.HasExited) {
+                Get-Content $stderr
                 throw "Synth exited during startup with code $($process.ExitCode)"
               }
               $handle = $process.MainWindowHandle
