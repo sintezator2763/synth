@@ -2,7 +2,11 @@ use std::{
     collections::{HashMap, VecDeque},
     io::{self, BufRead, BufReader, Cursor, Read, Seek},
     path::Path,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
 };
 
 use alacritty_terminal::{
@@ -32,7 +36,8 @@ const MAX_FRAME: usize = 128 * 1024;
 const MAX_PACKET: usize = 12 * 1024 * 1024;
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
-const MAX_PLACEMENTS: usize = 256;
+const MAX_PLACEMENTS: usize = 8192;
+const MAX_PENDING_BYTES: usize = 24 * 1024 * 1024;
 
 #[derive(Default)]
 enum ParseState {
@@ -131,17 +136,21 @@ pub struct GraphicsPty {
     pty: tty::Pty,
     parser: GraphicsParser,
     output: VecDeque<u8>,
-    packets: mpsc::SyncSender<Transfer>,
+    packets: mpsc::Sender<PendingTransfer>,
+    pending_bytes: Arc<AtomicUsize>,
+    size: WindowSize,
     assembler: Option<Transfer>,
 }
 
 impl GraphicsPty {
-    pub fn new(pty: tty::Pty, packets: mpsc::SyncSender<Transfer>) -> Self {
+    pub fn new(pty: tty::Pty, packets: mpsc::Sender<PendingTransfer>, size: WindowSize) -> Self {
         Self {
             pty,
             parser: GraphicsParser::default(),
             output: VecDeque::new(),
             packets,
+            pending_bytes: Arc::default(),
+            size,
             assembler: None,
         }
     }
@@ -160,9 +169,11 @@ impl Read for GraphicsPty {
             }
             self.parser
                 .accept(&raw[..count], &mut self.output, |packet, output| {
-                    if let Some(transfer) = assemble(&mut self.assembler, &packet) {
-                        let cursor_movement = transfer.cursor_movement();
-                        if self.packets.try_send(transfer).is_ok() {
+                    if let Some(transfer) = assemble(&mut self.assembler, &packet)
+                        && let Some(pending) = PendingTransfer::new(transfer, &self.pending_bytes)
+                    {
+                        let cursor_movement = pending.transfer.cursor_movement(self.size);
+                        if self.packets.send(pending).is_ok() {
                             output.extend(REPORT_POSITION);
                             output.extend(cursor_movement.bytes());
                         }
@@ -209,6 +220,7 @@ impl EventedReadWrite for GraphicsPty {
 impl OnResize for GraphicsPty {
     fn on_resize(&mut self, size: WindowSize) {
         self.pty.on_resize(size);
+        self.size = size;
     }
 }
 
@@ -241,19 +253,59 @@ impl Metadata {
     }
 }
 
-pub struct Transfer {
+pub struct PendingTransfer {
+    transfer: Transfer,
+    pending_bytes: Arc<AtomicUsize>,
+    charge: usize,
+}
+
+impl PendingTransfer {
+    fn new(transfer: Transfer, pending_bytes: &Arc<AtomicUsize>) -> Option<Self> {
+        let metadata = transfer.metadata.0.values().map(String::len).sum::<usize>();
+        let charge = transfer.data.capacity() + metadata + 512;
+        pending_bytes
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                (used + charge <= MAX_PENDING_BYTES).then_some(used + charge)
+            })
+            .ok()?;
+        Some(Self {
+            transfer,
+            pending_bytes: Arc::clone(pending_bytes),
+            charge,
+        })
+    }
+}
+
+impl Drop for PendingTransfer {
+    fn drop(&mut self) {
+        self.pending_bytes.fetch_sub(self.charge, Ordering::Relaxed);
+    }
+}
+
+struct Transfer {
     metadata: Metadata,
     data: Vec<u8>,
 }
 
 impl Transfer {
-    fn cursor_movement(&self) -> String {
+    fn cursor_movement(&self, size: WindowSize) -> String {
         if !matches!(self.metadata.get(b'a'), "T" | "p") || self.metadata.get(b'C') == "1" {
             return String::new();
         }
         let mut movement = String::new();
-        let rows = self.metadata.number(b'r').min(1024);
-        let columns = self.metadata.number(b'c').min(1024);
+        let cells = |key, pixels, cell: u16| {
+            let explicit = self.metadata.number(key);
+            if explicit == 0 {
+                self.metadata
+                    .number(pixels)
+                    .div_ceil(usize::from(cell.max(1)))
+                    .min(1024)
+            } else {
+                explicit.min(1024)
+            }
+        };
+        let rows = cells(b'r', b'v', size.cell_height).saturating_sub(1);
+        let columns = cells(b'c', b's', size.cell_width);
         if rows > 0 {
             movement.push_str(&format!("\x1b[{rows}B"));
         }
@@ -334,22 +386,22 @@ impl Graphics {
     pub fn receive(
         &mut self,
         ctx: &Context,
-        transfer: Transfer,
+        pending: PendingTransfer,
         position: Position,
     ) -> Option<String> {
-        let Transfer { metadata, data } = transfer;
+        let Transfer { metadata, data } = &pending.transfer;
         let requested = metadata.number(b'i');
         let action = metadata.get(b'a');
         let result = match action {
-            "p" => self.place(&metadata, requested, position),
+            "p" => self.place(metadata, requested, position),
             "d" => {
-                self.delete(&metadata, position.alternate);
+                self.delete(metadata, position.alternate);
                 Ok(())
             }
-            "" | "t" | "T" | "q" => self.transmit(ctx, &metadata, &data, position),
+            "" | "t" | "T" | "q" => self.transmit(ctx, metadata, data, position),
             _ => Err("ENOTSUP: Graphics action is unsupported"),
         };
-        reply(&metadata, result)
+        reply(metadata, result)
     }
 
     fn transmit(

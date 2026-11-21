@@ -18,20 +18,22 @@ use eframe::egui::{self, Align2, Color32, FontId, Key, Modifiers, Rect, Sense, S
 
 use crate::{
     config::Terminal as Settings,
-    graphics::{self, Graphics, GraphicsPty, Position, Transfer},
+    graphics::{self, Graphics, GraphicsPty, PendingTransfer, Position},
 };
 
-type GraphicEvent = (Transfer, (usize, usize));
+enum TerminalEvent {
+    Terminal(Event),
+    Graphics(PendingTransfer, (usize, usize)),
+}
 
 struct GraphicsEvents {
-    reports: mpsc::SyncSender<GraphicEvent>,
-    packets: mpsc::Receiver<Transfer>,
+    packets: mpsc::Receiver<PendingTransfer>,
     awaiting_position: bool,
 }
 
 #[derive(Clone)]
 struct EventProxy {
-    events: mpsc::Sender<Event>,
+    events: mpsc::Sender<TerminalEvent>,
     ctx: egui::Context,
     graphics: Arc<Mutex<GraphicsEvents>>,
 }
@@ -49,7 +51,7 @@ impl EventListener for EventProxy {
                     if let Some(position) = graphics::reported_position(text)
                         && let Ok(packet) = graphics.packets.try_recv()
                     {
-                        let _ = graphics.reports.try_send((packet, position));
+                        let _ = self.events.send(TerminalEvent::Graphics(packet, position));
                         self.ctx.request_repaint();
                         return;
                     }
@@ -58,7 +60,7 @@ impl EventListener for EventProxy {
             }
         }
         if !matches!(event, Event::Wakeup | Event::MouseCursorDirty) {
-            let _ = self.events.send(event);
+            let _ = self.events.send(TerminalEvent::Terminal(event));
         }
         self.ctx.request_repaint();
     }
@@ -103,8 +105,7 @@ fn window_size(grid: GridSize, cell: Vec2) -> WindowSize {
 pub struct Terminal {
     term: Arc<FairMutex<Term<EventProxy>>>,
     sender: EventLoopSender,
-    events: mpsc::Receiver<Event>,
-    graphic_events: mpsc::Receiver<GraphicEvent>,
+    events: mpsc::Receiver<TerminalEvent>,
     graphics: Graphics,
     size: WindowSize,
     font: FontId,
@@ -120,6 +121,20 @@ impl Terminal {
         let mut options = tty::Options::default();
         options.env.insert("TERM".into(), "xterm-256color".into());
         options.env.insert("COLORTERM".into(), "truecolor".into());
+        options.env.insert("TERM_PROGRAM".into(), "Synth".into());
+        for name in [
+            "WT_SESSION",
+            "KITTY_WINDOW_ID",
+            "WEZTERM_EXECUTABLE",
+            "ITERM_SESSION_ID",
+            "TMUX",
+            "STY",
+            "ZELLIJ",
+        ] {
+            if env::var_os(name).is_some() {
+                options.env.insert(name.into(), String::new());
+            }
+        }
         let executable = env::current_exe()?;
         if let Some(dir) = executable.parent() {
             let paths = std::iter::once(dir.to_path_buf())
@@ -164,13 +179,11 @@ impl Terminal {
         }
 
         let (tx, events) = mpsc::channel();
-        let (packets_sender, packets) = mpsc::sync_channel(8);
-        let (reports, graphic_events) = mpsc::sync_channel(8);
+        let (packets_sender, packets) = mpsc::channel();
         let proxy = EventProxy {
             events: tx,
             ctx: ui.ctx().clone(),
             graphics: Arc::new(Mutex::new(GraphicsEvents {
-                reports,
                 packets,
                 awaiting_position: false,
             })),
@@ -184,7 +197,7 @@ impl Terminal {
             proxy.clone(),
         )));
         let pty = tty::new(&options, size, 0)?;
-        let pty = GraphicsPty::new(pty, packets_sender);
+        let pty = GraphicsPty::new(pty, packets_sender, size);
         let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)?;
         let sender = event_loop.channel();
         event_loop.spawn();
@@ -192,7 +205,6 @@ impl Terminal {
             term,
             sender,
             events,
-            graphic_events,
             graphics: Graphics::default(),
             size,
             font,
@@ -264,6 +276,23 @@ impl Terminal {
             self.size = size;
         }
         for event in self.events.try_iter() {
+            let event = match event {
+                TerminalEvent::Terminal(event) => event,
+                TerminalEvent::Graphics(packet, (row, column)) => {
+                    let position = {
+                        let term = self.term.lock();
+                        Position {
+                            row: (term.grid().history_size() + row) as i64,
+                            column,
+                            alternate: term.mode().contains(TermMode::ALT_SCREEN),
+                        }
+                    };
+                    if let Some(reply) = self.graphics.receive(ui.ctx(), packet, position) {
+                        self.write(reply);
+                    }
+                    continue;
+                }
+            };
             match event {
                 Event::Exit | Event::ChildExit(_) => return true,
                 Event::PtyWrite(text) => self.write(text),
@@ -279,20 +308,6 @@ impl Terminal {
                 }
                 Event::ClipboardStore(_, text) => ui.ctx().copy_text(text),
                 _ => {}
-            }
-        }
-
-        for (packet, (row, column)) in self.graphic_events.try_iter() {
-            let position = {
-                let term = self.term.lock();
-                Position {
-                    row: (term.grid().history_size() + row) as i64,
-                    column,
-                    alternate: term.mode().contains(TermMode::ALT_SCREEN),
-                }
-            };
-            if let Some(reply) = self.graphics.receive(ui.ctx(), packet, position) {
-                self.write(reply);
             }
         }
         let response = ui.interact(

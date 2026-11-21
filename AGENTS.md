@@ -8,6 +8,6 @@ Synth creates its config on first GUI launch. Windows stores it beside the execu
 
 Run `synth --help` for the command list. Commands target the running copy of the same executable or package. From an external shell, invoke that copy by path when it is outside PATH. The default Windows CMD defines `synth` for the current session. Custom Windows shells can invoke the path in `SYNTH_EXE`, for example `& $env:SYNTH_EXE terminal toggle` in PowerShell.
 
-The built-in terminal supports direct Kitty graphics transfers for PNG, RGB and RGBA, including chunked transfers and zlib compression. Where available, use `kitten icat --transfer-mode=stream`. With the panel open, `synth terminal image PATH` displays a local PNG or JPEG through Synth's command channel.
+The built-in terminal supports direct Kitty graphics transfers for PNG, RGB and RGBA, including chunked transfers and zlib compression. At a Unix PTY, Yazi can detect the streamed Kitty protocol for previews and Fastfetch can use it with `fastfetch --kitty IMAGE`. Windows ConPTY does not transparently forward Kitty APC sequences. With the panel open, `synth terminal image PATH` displays a local PNG or JPEG through Synth's command channel.
 
 GitHub Actions publishes the EXE, universal DMG, and x86-64 AppImage on successful main builds. The Cargo major and minor version define the series and the workflow run number supplies the patch version. Pushing a `vMAJOR.MINOR.PATCH` tag selects that exact version. Pull requests build artifacts for review.
