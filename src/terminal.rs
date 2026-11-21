@@ -1,0 +1,608 @@
+use std::{
+    env, io,
+    sync::{Arc, mpsc},
+};
+
+use alacritty_terminal::{
+    event::{Event, EventListener, WindowSize},
+    event_loop::{EventLoop, EventLoopSender, Msg},
+    grid::{Dimensions, Scroll},
+    index::{Column, Line, Point, Side},
+    selection::{Selection, SelectionType},
+    sync::FairMutex,
+    term::{self, Term, TermMode, cell::Flags},
+    tty,
+    vte::ansi::{Color, CursorShape, NamedColor, Rgb},
+};
+use eframe::egui::{self, Align2, Color32, FontId, Key, Modifiers, Rect, Sense, Stroke, Vec2};
+
+use crate::config::Terminal as Settings;
+
+#[derive(Clone)]
+struct EventProxy {
+    events: mpsc::Sender<Event>,
+    ctx: egui::Context,
+}
+
+impl EventListener for EventProxy {
+    fn send_event(&self, event: Event) {
+        if !matches!(event, Event::Wakeup | Event::MouseCursorDirty) {
+            let _ = self.events.send(event);
+        }
+        self.ctx.request_repaint();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GridSize {
+    columns: u16,
+    lines: u16,
+}
+
+impl Dimensions for GridSize {
+    fn total_lines(&self) -> usize {
+        self.screen_lines()
+    }
+
+    fn screen_lines(&self) -> usize {
+        self.lines.into()
+    }
+
+    fn columns(&self) -> usize {
+        self.columns.into()
+    }
+}
+
+fn grid_size(rect: Rect, cell: Vec2) -> GridSize {
+    GridSize {
+        columns: ((rect.width() / cell.x) as u16).max(2),
+        lines: ((rect.height() / cell.y) as u16).max(2),
+    }
+}
+
+fn window_size(grid: GridSize, cell: Vec2) -> WindowSize {
+    WindowSize {
+        num_lines: grid.lines,
+        num_cols: grid.columns,
+        cell_width: cell.x as u16,
+        cell_height: cell.y as u16,
+    }
+}
+
+pub struct Terminal {
+    term: Arc<FairMutex<Term<EventProxy>>>,
+    sender: EventLoopSender,
+    events: mpsc::Receiver<Event>,
+    size: WindowSize,
+    font: FontId,
+}
+
+impl Terminal {
+    pub fn start(ui: &egui::Ui, rect: Rect, settings: &Settings) -> io::Result<Self> {
+        let font = FontId::monospace(settings.font_size);
+        let cell = cell_size(ui, &font);
+        let grid = grid_size(rect, cell);
+        let size = window_size(grid, cell);
+
+        let mut options = tty::Options::default();
+        options.env.insert("TERM".into(), "xterm-256color".into());
+        options.env.insert("COLORTERM".into(), "truecolor".into());
+        if let Some(dir) = env::current_exe()?.parent() {
+            let paths = std::iter::once(dir.to_path_buf())
+                .chain(env::var_os("PATH").iter().flat_map(env::split_paths))
+                .collect::<Vec<_>>();
+            if let Ok(path) = env::join_paths(paths)
+                && let Ok(path) = path.into_string()
+            {
+                options.env.insert("PATH".into(), path);
+            }
+        }
+        if let Some(shell) = &settings.shell {
+            options.shell = Some(tty::Shell::new(shell.clone(), settings.args.clone()));
+        }
+        #[cfg(windows)]
+        {
+            options.escape_args = true;
+            if options.shell.is_none() {
+                options.shell = Some(tty::Shell::new("cmd.exe".into(), vec!["/D".into()]));
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            if options.shell.is_none()
+                && let Some(shell) = env::var("SHELL").ok().filter(|shell| !shell.is_empty())
+            {
+                options.shell = Some(tty::Shell::new(shell, Vec::new()));
+            }
+        }
+
+        let (tx, events) = mpsc::channel();
+        let proxy = EventProxy {
+            events: tx,
+            ctx: ui.ctx().clone(),
+        };
+        let term = Arc::new(FairMutex::new(Term::new(
+            term::Config::default(),
+            &grid,
+            proxy.clone(),
+        )));
+        let pty = tty::new(&options, size, 0)?;
+        let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)?;
+        let sender = event_loop.channel();
+        event_loop.spawn();
+        Ok(Self {
+            term,
+            sender,
+            events,
+            size,
+            font,
+        })
+    }
+
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        request_focus: bool,
+        interactive: bool,
+        foreground: Color32,
+        background: Color32,
+    ) -> bool {
+        let cell = cell_size(ui, &self.font);
+        let grid = grid_size(rect, cell);
+        let size = window_size(grid, cell);
+        if (
+            size.num_lines,
+            size.num_cols,
+            size.cell_width,
+            size.cell_height,
+        ) != (
+            self.size.num_lines,
+            self.size.num_cols,
+            self.size.cell_width,
+            self.size.cell_height,
+        ) {
+            self.term.lock().resize(grid);
+            let _ = self.sender.send(Msg::Resize(size));
+            self.size = size;
+        }
+        for event in self.events.try_iter() {
+            match event {
+                Event::Exit | Event::ChildExit(_) => return true,
+                Event::PtyWrite(text) => self.write(text),
+                Event::TextAreaSizeRequest(format) => self.write(format(self.size)),
+                Event::ColorRequest(index, format) => {
+                    let color = self.term.lock().colors()[index]
+                        .map_or_else(|| palette(index, foreground, background), rgb_color);
+                    self.write(format(Rgb {
+                        r: color.r(),
+                        g: color.g(),
+                        b: color.b(),
+                    }));
+                }
+                Event::ClipboardStore(_, text) => ui.ctx().copy_text(text),
+                _ => {}
+            }
+        }
+
+        let response = ui.interact(
+            rect.intersect(ui.clip_rect()),
+            ui.id().with("pty"),
+            Sense::click_and_drag(),
+        );
+        if interactive && (request_focus || response.clicked() || response.drag_started()) {
+            response.request_focus();
+        }
+        if interactive {
+            self.pointer_input(ui, &response, rect, cell, grid);
+            if response.has_focus() {
+                ui.memory_mut(|memory| {
+                    memory.set_focus_lock_filter(
+                        response.id,
+                        egui::EventFilter {
+                            tab: true,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: true,
+                        },
+                    );
+                });
+                self.keyboard_input(ui);
+            }
+        } else {
+            response.surrender_focus();
+        }
+
+        self.draw(ui, rect, cell, foreground, background, response.has_focus());
+        false
+    }
+
+    fn write(&self, bytes: impl Into<Vec<u8>>) {
+        let _ = self.sender.send(Msg::Input(bytes.into().into()));
+    }
+
+    fn keyboard_input(&self, ui: &egui::Ui) {
+        let mode = *self.term.lock().mode();
+        for event in ui.input(|input| input.events.clone()) {
+            match event {
+                egui::Event::Text(text) => self.write(text),
+                egui::Event::Ime(egui::ImeEvent::Commit(text)) => self.write(text),
+                egui::Event::Paste(text) => {
+                    let text = text.replace("\r\n", "\n").replace('\n', "\r");
+                    if mode.contains(TermMode::BRACKETED_PASTE) {
+                        self.write(format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")));
+                    } else {
+                        self.write(text);
+                    }
+                }
+                egui::Event::Copy => {
+                    let modifiers = ui.input(|input| input.modifiers);
+                    let selection = self.term.lock().selection_to_string();
+                    if !cfg!(target_os = "macos") && modifiers.ctrl && !modifiers.shift {
+                        self.write(b"\x03");
+                    } else if let Some(text) = selection {
+                        ui.ctx().copy_text(text);
+                    } else if !cfg!(target_os = "macos") && !modifiers.shift {
+                        self.write(b"\x03");
+                    }
+                }
+                egui::Event::Cut if !cfg!(target_os = "macos") => self.write(b"\x18"),
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
+                    if key == Key::C && modifiers.ctrl && modifiers.shift {
+                        if let Some(text) = self.term.lock().selection_to_string() {
+                            ui.ctx().copy_text(text);
+                        }
+                    } else if let Some(bytes) = key_bytes(key, modifiers, mode) {
+                        self.write(bytes);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn pointer_input(
+        &self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: Rect,
+        cell: Vec2,
+        grid: GridSize,
+    ) {
+        let mut term = self.term.lock();
+        if response.hovered() {
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll.abs() > 0.0 {
+                let lines = ((scroll / cell.y).abs().ceil() as i32) * scroll.signum() as i32;
+                if term
+                    .mode()
+                    .contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
+                {
+                    let key = if lines > 0 {
+                        Key::ArrowUp
+                    } else {
+                        Key::ArrowDown
+                    };
+                    if let Some(bytes) = key_bytes(key, Modifiers::NONE, *term.mode()) {
+                        self.write(bytes.repeat(lines.unsigned_abs().min(64) as usize));
+                    }
+                } else {
+                    term.scroll_display(Scroll::Delta(lines));
+                }
+            }
+        }
+        let Some(pos) = response.interact_pointer_pos() else {
+            return;
+        };
+        let relative = pos - rect.min;
+        let column = (relative.x / cell.x).clamp(0.0, f32::from(grid.columns - 1));
+        let line = (relative.y / cell.y).clamp(0.0, f32::from(grid.lines - 1)) as i32;
+        let point = Point::new(
+            Line(line - term.grid().display_offset() as i32),
+            Column(column as usize),
+        );
+        let side = if column.fract() < 0.5 {
+            Side::Left
+        } else {
+            Side::Right
+        };
+        if response.drag_started() {
+            term.selection = Some(Selection::new(SelectionType::Simple, point, side));
+        } else if response.dragged() || response.drag_stopped() {
+            if let Some(selection) = &mut term.selection {
+                selection.update(point, side);
+            }
+        } else if response.double_clicked() {
+            term.selection = Some(Selection::new(SelectionType::Semantic, point, side));
+        } else if response.clicked() {
+            term.selection = None;
+        }
+    }
+
+    fn draw(
+        &self,
+        ui: &egui::Ui,
+        rect: Rect,
+        cell: Vec2,
+        foreground: Color32,
+        background: Color32,
+        focused: bool,
+    ) {
+        let term = self.term.lock();
+        let content = term.renderable_content();
+        let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+        for entry in content.display_iter {
+            let flags = entry.flags;
+            if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let x = entry.point.column.0 as f32 * cell.x;
+            let y = (entry.point.line.0 + content.display_offset as i32) as f32 * cell.y;
+            let width = if flags.contains(Flags::WIDE_CHAR) {
+                cell.x * 2.0
+            } else {
+                cell.x
+            };
+            let bounds =
+                Rect::from_min_size(rect.min + egui::vec2(x, y), egui::vec2(width, cell.y));
+            let color = |color| match color {
+                Color::Spec(rgb) => rgb_color(rgb),
+                Color::Named(name) => {
+                    let index = name as usize;
+                    content.colors[index]
+                        .map_or_else(|| palette(index, foreground, background), rgb_color)
+                }
+                Color::Indexed(index) => {
+                    let index = usize::from(index);
+                    content.colors[index]
+                        .map_or_else(|| palette(index, foreground, background), rgb_color)
+                }
+            };
+            let mut fg = color(entry.fg);
+            let mut bg = color(entry.bg);
+            let selected = content
+                .selection
+                .is_some_and(|selection| selection.contains(entry.point));
+            if selected != flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            if flags.contains(Flags::DIM) {
+                fg = fg.gamma_multiply(0.7);
+            }
+            if bg != background {
+                painter.rect_filled(bounds, 0.0, bg);
+            }
+
+            if entry.point == content.cursor.point && content.display_offset == 0 {
+                match content.cursor.shape {
+                    CursorShape::Hidden => {}
+                    CursorShape::Block if focused => {
+                        painter.rect_filled(bounds, 0.0, fg);
+                        std::mem::swap(&mut fg, &mut bg);
+                    }
+                    CursorShape::Beam => {
+                        painter.line_segment(
+                            [bounds.left_top(), bounds.left_bottom()],
+                            Stroke::new(1.5_f32, fg),
+                        );
+                    }
+                    CursorShape::Underline => {
+                        painter.hline(
+                            bounds.x_range(),
+                            bounds.bottom() - 1.0,
+                            Stroke::new(1.5_f32, fg),
+                        );
+                    }
+                    _ => {
+                        painter.rect_stroke(
+                            bounds,
+                            0.0,
+                            Stroke::new(1.0_f32, fg),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+            }
+
+            if entry.c != ' ' && !flags.contains(Flags::HIDDEN) {
+                let mut text = String::from(entry.c);
+                if let Some(chars) = entry.zerowidth() {
+                    text.extend(chars);
+                }
+                painter.text(
+                    bounds.left_top(),
+                    Align2::LEFT_TOP,
+                    text,
+                    self.font.clone(),
+                    fg,
+                );
+            }
+            if flags.intersects(Flags::ALL_UNDERLINES | Flags::STRIKEOUT) {
+                let y = if flags.contains(Flags::STRIKEOUT) {
+                    bounds.center().y
+                } else {
+                    bounds.bottom() - 1.0
+                };
+                painter.hline(bounds.x_range(), y, Stroke::new(1.0_f32, fg));
+            }
+        }
+    }
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        let _ = self.sender.send(Msg::Shutdown);
+    }
+}
+
+fn cell_size(ui: &egui::Ui, font: &FontId) -> Vec2 {
+    ui.fonts(|fonts| {
+        egui::vec2(
+            fonts.glyph_width(font, 'M').ceil(),
+            fonts.row_height(font).ceil(),
+        )
+    })
+}
+
+fn rgb_color(rgb: Rgb) -> Color32 {
+    Color32::from_rgb(rgb.r, rgb.g, rgb.b)
+}
+
+fn palette(index: usize, foreground: Color32, background: Color32) -> Color32 {
+    const ANSI: [(u8, u8, u8); 16] = [
+        (28, 34, 46),
+        (218, 95, 104),
+        (100, 168, 124),
+        (198, 156, 73),
+        (93, 149, 219),
+        (167, 121, 213),
+        (61, 164, 180),
+        (197, 208, 224),
+        (99, 112, 133),
+        (243, 124, 134),
+        (133, 197, 146),
+        (230, 183, 93),
+        (130, 176, 242),
+        (199, 151, 238),
+        (102, 201, 214),
+        (235, 241, 250),
+    ];
+    match index {
+        0..=15 => {
+            let (r, g, b) = ANSI[index];
+            Color32::from_rgb(r, g, b)
+        }
+        16..=231 => {
+            let value = index - 16;
+            let level = |component: usize| {
+                if component == 0 {
+                    0
+                } else {
+                    55 + 40 * component as u8
+                }
+            };
+            Color32::from_rgb(level(value / 36), level(value / 6 % 6), level(value % 6))
+        }
+        232..=255 => Color32::from_gray(8 + 10 * (index as u8 - 232)),
+        index if index == NamedColor::Background as usize => background,
+        _ => foreground,
+    }
+}
+
+fn key_bytes(key: Key, modifiers: Modifiers, mode: TermMode) -> Option<Vec<u8>> {
+    if modifiers.ctrl && !modifiers.shift && !modifiers.alt {
+        let name = key.name().as_bytes();
+        if name.len() == 1 && name[0].is_ascii_uppercase() {
+            return Some(vec![name[0] - b'A' + 1]);
+        }
+        let byte = match key {
+            Key::Space => Some(0),
+            Key::OpenBracket => Some(27),
+            Key::Backslash => Some(28),
+            Key::CloseBracket => Some(29),
+            _ => None,
+        };
+        if let Some(byte) = byte {
+            return Some(vec![byte]);
+        }
+    }
+
+    let modifiers_code =
+        1 + u8::from(modifiers.shift) + 2 * u8::from(modifiers.alt) + 4 * u8::from(modifiers.ctrl);
+    let cursor = match key {
+        Key::ArrowUp => Some('A'),
+        Key::ArrowDown => Some('B'),
+        Key::ArrowRight => Some('C'),
+        Key::ArrowLeft => Some('D'),
+        Key::Home => Some('H'),
+        Key::End => Some('F'),
+        _ => None,
+    };
+    if let Some(cursor) = cursor {
+        let sequence = if modifiers_code != 1 {
+            format!("\x1b[1;{modifiers_code}{cursor}")
+        } else if mode.contains(TermMode::APP_CURSOR) {
+            format!("\x1bO{cursor}")
+        } else {
+            format!("\x1b[{cursor}")
+        };
+        return Some(sequence.into_bytes());
+    }
+
+    let tilde = match key {
+        Key::Insert => Some(2),
+        Key::Delete => Some(3),
+        Key::PageUp => Some(5),
+        Key::PageDown => Some(6),
+        Key::F5 => Some(15),
+        Key::F6 => Some(17),
+        Key::F7 => Some(18),
+        Key::F8 => Some(19),
+        Key::F9 => Some(20),
+        Key::F10 => Some(21),
+        Key::F11 => Some(23),
+        Key::F12 => Some(24),
+        _ => None,
+    };
+    if let Some(code) = tilde {
+        let sequence = if modifiers_code == 1 {
+            format!("\x1b[{code}~")
+        } else {
+            format!("\x1b[{code};{modifiers_code}~")
+        };
+        return Some(sequence.into_bytes());
+    }
+
+    let bytes: &[u8] = match key {
+        Key::Enter => b"\r",
+        Key::Tab if modifiers.shift => b"\x1b[Z",
+        Key::Tab => b"\t",
+        Key::Backspace if modifiers.ctrl => b"\x08",
+        Key::Backspace => b"\x7f",
+        Key::Escape => b"\x1b",
+        Key::F1 => b"\x1bOP",
+        Key::F2 => b"\x1bOQ",
+        Key::F3 => b"\x1bOR",
+        Key::F4 => b"\x1bOS",
+        _ => return None,
+    };
+    Some(bytes.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_keys_reach_the_terminal_as_bytes() {
+        assert_eq!(
+            key_bytes(Key::C, Modifiers::CTRL, TermMode::empty()),
+            Some(vec![3])
+        );
+        assert_eq!(
+            key_bytes(Key::Tab, Modifiers::NONE, TermMode::empty()),
+            Some(vec![9])
+        );
+        assert_eq!(
+            key_bytes(Key::Escape, Modifiers::NONE, TermMode::empty()),
+            Some(vec![27])
+        );
+    }
+
+    #[test]
+    fn cursor_keys_respect_application_mode() {
+        assert_eq!(
+            key_bytes(Key::ArrowUp, Modifiers::NONE, TermMode::APP_CURSOR).as_deref(),
+            Some(b"\x1bOA".as_slice())
+        );
+        assert_eq!(
+            key_bytes(Key::ArrowUp, Modifiers::CTRL, TermMode::APP_CURSOR).as_deref(),
+            Some(b"\x1b[1;5A".as_slice())
+        );
+    }
+}

@@ -1,0 +1,11 @@
+[editor]
+theme = "dark"
+font_size = 16.0
+
+[terminal]
+side = "right"
+width_fraction = 0.44
+animation_ms = 180
+font_size = 14.0
+toggle_key = "Esc"
+args = []

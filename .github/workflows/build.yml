@@ -1,0 +1,112 @@
+name: Build Synth
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      number: ${{ steps.version.outputs.number }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        shell: python
+        run: |
+          import os
+          import re
+          import tomllib
+
+          with open("Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["package"]["version"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+              raise SystemExit("Expected a numeric major.minor.patch version")
+          if os.environ["GITHUB_REF_TYPE"] == "tag" and os.environ["GITHUB_REF_NAME"] != f"v{version}":
+              raise SystemExit(f"Release tag must be v{version}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"number={version}", file=output)
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            targets: x86_64-unknown-linux-gnu
+          - os: windows-2022
+            platform: windows
+            targets: x86_64-pc-windows-msvc
+          - os: macos-15
+            platform: macos
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    env:
+      SYNTH_VERSION: ${{ needs.version.outputs.number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils libxkbcommon-dev
+      - run: cargo test --locked
+      - name: Build Windows EXE
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force dist
+          Copy-Item target/x86_64-pc-windows-msvc/release/synth.exe dist/synth.exe
+      - name: Build macOS DMG
+        if: matrix.platform == 'macos'
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
+          bash packaging/macos.sh "$SYNTH_VERSION" "dist/Synth-$SYNTH_VERSION-macos-universal.dmg"
+      - name: Build Linux AppImage
+        if: matrix.platform == 'linux'
+        run: |
+          cargo build --locked --release --target x86_64-unknown-linux-gnu
+          bash packaging/linux.sh target/x86_64-unknown-linux-gnu/release/synth "dist/Synth-$SYNTH_VERSION-linux-x86_64.AppImage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Synth-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [version, build]
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Synth-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Synth v${{ needs.version.outputs.number }}
+          body: Автосборка.
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/synth.exe
+            dist/*.dmg
+            dist/*.AppImage
