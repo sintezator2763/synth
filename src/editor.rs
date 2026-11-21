@@ -181,23 +181,13 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
             );
             bar.spacing_mut().item_spacing.x = 0.0;
             bar.add_space(8.0);
-            for color in [
-                palette.window_dot_red,
-                palette.window_dot_yellow,
-                palette.window_dot_green,
-            ] {
-                let (rect, _) =
-                    bar.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                bar.painter().circle_filled(rect.center(), 5.0, color);
-            }
-            bar.add_space(16.0);
             bar.label(
                 RichText::new("synth")
                     .monospace()
                     .size(config.interface.tab_font_size)
                     .color(palette.tab_text(false)),
             );
-            bar.add_space(62.0);
+            bar.add_space(28.0);
             let mut action = None;
             ScrollArea::horizontal()
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)

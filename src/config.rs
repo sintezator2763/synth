@@ -107,11 +107,11 @@ struct ColorOverrides {
     #[serde(rename = "status_bar_bg", alias = "status_background")]
     status_background: Option<HexColor>,
     #[serde(rename = "decoration_accent_1", alias = "window_dot_red")]
-    window_dot_red: Option<HexColor>,
+    _legacy_decoration_accent_1: Option<HexColor>,
     #[serde(rename = "decoration_accent_2", alias = "window_dot_yellow")]
-    window_dot_yellow: Option<HexColor>,
+    _legacy_decoration_accent_2: Option<HexColor>,
     #[serde(rename = "decoration_accent_3", alias = "window_dot_green")]
-    window_dot_green: Option<HexColor>,
+    _legacy_decoration_accent_3: Option<HexColor>,
 }
 
 #[derive(Clone, Copy)]
@@ -126,9 +126,6 @@ pub struct Palette {
     pub tab_text_active: Color32,
     pub tab_text_inactive: Color32,
     pub status_background: Color32,
-    pub window_dot_red: Color32,
-    pub window_dot_yellow: Color32,
-    pub window_dot_green: Color32,
 }
 
 impl Palette {
@@ -145,9 +142,6 @@ impl Palette {
                 tab_text_active: Color32::from_rgb(214, 220, 232),
                 tab_text_inactive: Color32::from_rgb(166, 175, 190),
                 status_background: Color32::from_rgb(32, 37, 46),
-                window_dot_red: Color32::from_rgb(240, 137, 142),
-                window_dot_yellow: Color32::from_rgb(239, 198, 106),
-                window_dot_green: Color32::from_rgb(131, 204, 176),
             },
             Theme::Light => Self {
                 editor_background: Color32::from_rgb(246, 249, 253),
@@ -160,9 +154,6 @@ impl Palette {
                 tab_text_active: Color32::from_rgb(28, 43, 61),
                 tab_text_inactive: Color32::from_rgb(92, 103, 118),
                 status_background: Color32::from_rgb(234, 239, 246),
-                window_dot_red: Color32::from_rgb(240, 137, 142),
-                window_dot_yellow: Color32::from_rgb(239, 198, 106),
-                window_dot_green: Color32::from_rgb(131, 204, 176),
             },
         }
     }
@@ -225,15 +216,6 @@ impl Colors {
         }
         if let Some(value) = overrides.status_background {
             palette.status_background = value.0;
-        }
-        if let Some(value) = overrides.window_dot_red {
-            palette.window_dot_red = value.0;
-        }
-        if let Some(value) = overrides.window_dot_yellow {
-            palette.window_dot_yellow = value.0;
-        }
-        if let Some(value) = overrides.window_dot_green {
-            palette.window_dot_green = value.0;
         }
         palette
     }
@@ -741,9 +723,6 @@ mod tests {
             ("tab_text_active", "tab_active_fg"),
             ("tab_text_inactive", "tab_inactive_fg"),
             ("status_background", "status_bar_bg"),
-            ("window_dot_red", "decoration_accent_1"),
-            ("window_dot_yellow", "decoration_accent_2"),
-            ("window_dot_green", "decoration_accent_3"),
         ];
         for (legacy, current) in fields {
             let old = Config::parse(&format!("[colors.dark]\n{legacy} = '#123ABC'"))
@@ -762,14 +741,30 @@ mod tests {
             assert_eq!(old.tab_text_active, new.tab_text_active, "{current}");
             assert_eq!(old.tab_text_inactive, new.tab_text_inactive, "{current}");
             assert_eq!(old.status_background, new.status_background, "{current}");
-            assert_eq!(old.window_dot_red, new.window_dot_red, "{current}");
-            assert_eq!(old.window_dot_yellow, new.window_dot_yellow, "{current}");
-            assert_eq!(old.window_dot_green, new.window_dot_green, "{current}");
             let both = format!(
                 "[colors.dark]\n{legacy} = '#123ABC'\n{current} = '#654321'"
             );
             assert!(Config::parse(&both).is_err(), "{legacy} and {current}");
         }
+    }
+
+    #[test]
+    fn legacy_decoration_colors_remain_accepted_and_unused() {
+        let baseline = Config::parse("[colors.dark]").unwrap().palette();
+        let legacy = Config::parse(
+            "[colors.dark]\nwindow_dot_red = '#010203'\nwindow_dot_yellow = '#040506'\nwindow_dot_green = '#070809'",
+        )
+        .unwrap()
+        .palette();
+        let recent = Config::parse(
+            "[colors.dark]\ndecoration_accent_1 = '#010203'\ndecoration_accent_2 = '#040506'\ndecoration_accent_3 = '#070809'",
+        )
+        .unwrap()
+        .palette();
+        assert_eq!(baseline.editor_background, legacy.editor_background);
+        assert_eq!(baseline.editor_background, recent.editor_background);
+        assert_eq!(baseline.tabs_background, legacy.tabs_background);
+        assert_eq!(baseline.tabs_background, recent.tabs_background);
     }
 
     #[test]
@@ -789,7 +784,6 @@ mod tests {
         let light = config.colors.palette(Theme::Light);
         assert_eq!(dark.editor_background, Palette::defaults(Theme::Dark).editor_background);
         assert_eq!(dark.terminal_background, Palette::defaults(Theme::Dark).terminal_background);
-        assert_eq!(dark.window_dot_green, Palette::defaults(Theme::Dark).window_dot_green);
         assert_eq!(light.editor_background, Palette::defaults(Theme::Light).editor_background);
         assert_eq!(light.active_tab_background, Palette::defaults(Theme::Light).active_tab_background);
     }

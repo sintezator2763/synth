@@ -26,9 +26,6 @@ tab_active_bg = "#292D36"
 tab_active_fg = "#D6DCE8"
 tab_inactive_fg = "#A6AFBE"
 status_bar_bg = "#20252E"
-decoration_accent_1 = "#F0898E"
-decoration_accent_2 = "#EFC66A"
-decoration_accent_3 = "#83CCB0"
 
 [colors.light]
 editor_bg = "#F6F9FD"
@@ -41,9 +38,6 @@ tab_active_bg = "#FFFFFF"
 tab_active_fg = "#1C2B3D"
 tab_inactive_fg = "#5C6776"
 status_bar_bg = "#EAEFF6"
-decoration_accent_1 = "#F0898E"
-decoration_accent_2 = "#EFC66A"
-decoration_accent_3 = "#83CCB0"
 
 [terminal]
 side = "right" # right, left
