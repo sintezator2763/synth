@@ -169,7 +169,9 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
     }
     let palette = config.palette();
     egui::TopBottomPanel::top("tabs")
-        .frame(egui::Frame::NONE.fill(palette.tabs_background))
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(egui::Frame::NONE.fill(palette.editor_background))
         .exact_height(height)
         .show(ctx, |ui| {
             let mut area = ui.max_rect().shrink2(egui::vec2(10.0, 0.0));
@@ -181,13 +183,6 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
             );
             bar.spacing_mut().item_spacing.x = 0.0;
             bar.add_space(8.0);
-            bar.label(
-                RichText::new("synth")
-                    .monospace()
-                    .size(config.interface.tab_font_size)
-                    .color(palette.tab_text(false)),
-            );
-            bar.add_space(28.0);
             let mut action = None;
             ScrollArea::horizontal()
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
