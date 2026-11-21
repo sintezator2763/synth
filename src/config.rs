@@ -189,7 +189,8 @@ pub struct Interface {
     pub tab_max_chars: usize,
     pub tab_font_size: f32,
     pub tab_min_width: f32,
-    pub tab_new_button: bool,
+    #[serde(rename = "tab_new_button")]
+    _legacy_tab_new_button: Option<bool>,
     pub editor_padding: i8,
 }
 
@@ -204,7 +205,7 @@ impl Default for Interface {
             tab_max_chars: 28,
             tab_font_size: 12.0,
             tab_min_width: 96.0,
-            tab_new_button: true,
+            _legacy_tab_new_button: None,
             editor_padding: 18,
         }
     }
@@ -581,6 +582,15 @@ mod tests {
         assert_eq!(Theme::Dark.terminal_background(), Color32::from_rgb(23, 27, 34));
         assert_eq!(Theme::Dark.status_background(), Color32::from_rgb(32, 37, 46));
         assert_ne!(Theme::Light.tabs_background(), Theme::Dark.tabs_background());
+    }
+
+    #[test]
+    fn legacy_new_tab_button_setting_does_not_change_the_interface() {
+        let old_config = Config::parse("[interface]\ntab_new_button = true").unwrap();
+        let new_config = Config::parse("[interface]").unwrap();
+        assert_eq!(old_config.interface.tab_height, new_config.interface.tab_height);
+        assert_eq!(old_config.interface.tab_min_width, new_config.interface.tab_min_width);
+        assert!(Config::parse("[interface]\ntab_new_button = false").is_ok());
     }
 
     #[test]

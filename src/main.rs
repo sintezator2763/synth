@@ -19,7 +19,7 @@ use std::{
 use command::{Command, Reply, Request};
 use config::{Bindings, Config, ConfigWatch, Side};
 use document::Documents;
-use editor::{Editor, TabAction};
+use editor::Editor;
 use eframe::egui::{self, FontId};
 use terminal::Terminal;
 
@@ -322,11 +322,8 @@ impl eframe::App for Synth {
             self.notice = Some("Save or discard changed documents before closing Synth.".into());
         }
 
-        if let Some(action) = editor::tabs(ctx, &self.documents, &self.config) {
-            match action {
-                TabAction::Activate(index) => self.documents.active = index,
-                TabAction::New => self.documents.create(),
-            }
+        if let Some(index) = editor::tabs(ctx, &self.documents, &self.config) {
+            self.documents.active = index;
             self.pending_focus = Some(Focus::Editor);
         }
         editor::status(ctx, self.documents.current(), &self.config);

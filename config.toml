@@ -13,7 +13,6 @@ tab_height = 36.0
 tab_max_chars = 28
 tab_font_size = 12.0
 tab_min_width = 96.0
-tab_new_button = true
 editor_padding = 18
 
 [terminal]

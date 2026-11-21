@@ -12,12 +12,6 @@ use crate::{
     document::{Document, Documents},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TabAction {
-    Activate(usize),
-    New,
-}
-
 #[derive(Default)]
 pub struct Editor {
     syntax: Option<SyntaxLayouts>,
@@ -162,7 +156,7 @@ impl Editor {
     }
 }
 
-pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Option<TabAction> {
+pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Option<usize> {
     let height = config.interface.tab_height
         * config.animations.tabs.progress(
             ctx,
@@ -257,23 +251,8 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                             .on_hover_text(tooltip)
                             .clicked()
                         {
-                            action = Some(TabAction::Activate(index));
+                            action = Some(index);
                         }
-                    }
-                    if config.interface.tab_new_button
-                        && ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new("+")
-                                        .size(config.interface.tab_font_size + 2.0)
-                                        .color(theme.tab_text(false)),
-                                )
-                                .frame(false),
-                            )
-                            .on_hover_text("New tab")
-                            .clicked()
-                    {
-                        action = Some(TabAction::New);
                     }
                 });
             action
