@@ -173,8 +173,9 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
     if height <= 0.0 {
         return None;
     }
+    let theme = config.editor.theme;
     egui::TopBottomPanel::top("tabs")
-        .frame(egui::Frame::NONE.fill(config.editor.theme.terminal_background()))
+        .frame(egui::Frame::NONE.fill(theme.tabs_background()))
         .exact_height(height)
         .show(ctx, |ui| {
             let mut area = ui.max_rect().shrink2(egui::vec2(10.0, 0.0));
@@ -184,6 +185,25 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                     .max_rect(area)
                     .layout(Layout::left_to_right(Align::Center)),
             );
+            bar.spacing_mut().item_spacing.x = 0.0;
+            bar.add_space(8.0);
+            for color in [
+                Color32::from_rgb(240, 137, 142),
+                Color32::from_rgb(239, 198, 106),
+                Color32::from_rgb(131, 204, 176),
+            ] {
+                let (rect, _) =
+                    bar.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                bar.painter().circle_filled(rect.center(), 5.0, color);
+            }
+            bar.add_space(16.0);
+            bar.label(
+                RichText::new("synth")
+                    .monospace()
+                    .size(config.interface.tab_font_size)
+                    .color(theme.tab_text(false)),
+            );
+            bar.add_space(62.0);
             let mut action = None;
             ScrollArea::horizontal()
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
@@ -191,45 +211,67 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                     ui.spacing_mut().item_spacing.x = 6.0;
                     for (index, document) in documents.items.iter().enumerate() {
                         let active = index == documents.active;
+                        let foreground = theme.tab_text(active);
                         let fill = if active {
-                            ui.visuals().selection.bg_fill.gamma_multiply(0.65)
+                            theme.active_tab_background()
                         } else {
-                            ui.visuals().faint_bg_color
+                            Color32::TRANSPARENT
                         };
-                        let stroke = if active {
-                            ui.visuals().widgets.active.bg_stroke
-                        } else {
-                            egui::Stroke::NONE
-                        };
-                        egui::Frame::NONE
+                        let tab = egui::Frame::NONE
                             .fill(fill)
-                            .stroke(stroke)
                             .corner_radius(egui::CornerRadius::same(6))
-                            .inner_margin(egui::Margin::symmetric(8, 4))
+                            .inner_margin(egui::Margin::symmetric(12, 6))
                             .show(ui, |ui| {
-                                let name = document.name();
-                                let title = truncate_tab_name(&name, config.interface.tab_max_chars);
-                                let title = if document.dirty() {
-                                    format!("{title} *")
-                                } else {
-                                    title
-                                };
-                                let tooltip = document.path.as_ref().map_or_else(
-                                    || name.clone(),
-                                    |path| path.display().to_string(),
-                                );
-                                if ui
-                                    .add(egui::Button::new(RichText::new(title).monospace())
-                                        .frame(false))
-                                    .on_hover_text(tooltip)
-                                    .clicked()
-                                {
-                                    action = Some(TabAction::Activate(index));
-                                }
+                                ui.set_min_width(config.interface.tab_min_width);
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    if document.dirty() {
+                                        let (dot, _) = ui.allocate_exact_size(
+                                            egui::vec2(6.0, config.interface.tab_font_size),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().circle_filled(dot.center(), 2.5, foreground);
+                                    }
+                                    ui.label(
+                                        RichText::new(truncate_tab_name(
+                                            &document.name(),
+                                            config.interface.tab_max_chars,
+                                        ))
+                                        .monospace()
+                                        .size(config.interface.tab_font_size)
+                                        .color(foreground),
+                                    );
+                                });
                             });
+                        let tooltip = document.path.as_ref().map_or_else(
+                            || document.name(),
+                            |path| path.display().to_string(),
+                        );
+                        if ui
+                            .interact(
+                                tab.response.rect,
+                                ui.make_persistent_id(("synth_tab", document.id)),
+                                egui::Sense::click(),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text(tooltip)
+                            .clicked()
+                        {
+                            action = Some(TabAction::Activate(index));
+                        }
                     }
                     if config.interface.tab_new_button
-                        && ui.small_button("+").on_hover_text("New tab").clicked()
+                        && ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("+")
+                                        .size(config.interface.tab_font_size + 2.0)
+                                        .color(theme.tab_text(false)),
+                                )
+                                .frame(false),
+                            )
+                            .on_hover_text("New tab")
+                            .clicked()
                     {
                         action = Some(TabAction::New);
                     }
@@ -261,7 +303,7 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
         return;
     }
     egui::TopBottomPanel::bottom("status")
-        .frame(egui::Frame::NONE.fill(config.editor.theme.terminal_background()))
+        .frame(egui::Frame::NONE.fill(config.editor.theme.status_background()))
         .exact_height(height)
         .show(ctx, |ui| {
             let mut area = ui.max_rect().shrink2(egui::vec2(12.0, 0.0));

@@ -54,30 +54,64 @@ pub enum Theme {
 
 impl Theme {
     pub fn visuals(self) -> egui::Visuals {
-        let (mut visuals, background, foreground, selection) = match self {
+        let (mut visuals, background, foreground, selection, subdued) = match self {
             Self::Dark => (
                 egui::Visuals::dark(),
-                Color32::from_rgb(18, 23, 33),
-                Color32::from_rgb(221, 231, 243),
-                Color32::from_rgb(45, 68, 96),
+                Color32::from_rgb(17, 19, 24),
+                Color32::from_rgb(214, 220, 232),
+                Color32::from_rgb(55, 63, 80),
+                Color32::from_rgb(27, 30, 37),
             ),
             Self::Light => (
                 egui::Visuals::light(),
                 Color32::from_rgb(246, 249, 253),
                 Color32::from_rgb(28, 43, 61),
                 Color32::from_rgb(179, 214, 247),
+                Color32::from_rgb(234, 239, 246),
             ),
         };
         visuals.panel_fill = background;
         visuals.override_text_color = Some(foreground);
         visuals.selection.bg_fill = selection;
+        visuals.extreme_bg_color = background;
+        visuals.faint_bg_color = subdued;
         visuals
     }
 
     pub fn terminal_background(self) -> Color32 {
         match self {
-            Self::Dark => Color32::from_rgb(13, 18, 27),
+            Self::Dark => Color32::from_rgb(23, 27, 34),
             Self::Light => Color32::from_rgb(234, 241, 249),
+        }
+    }
+
+    pub fn tabs_background(self) -> Color32 {
+        match self {
+            Self::Dark => Color32::from_rgb(27, 30, 37),
+            Self::Light => Color32::from_rgb(230, 235, 243),
+        }
+    }
+
+    pub fn active_tab_background(self) -> Color32 {
+        match self {
+            Self::Dark => Color32::from_rgb(41, 45, 54),
+            Self::Light => Color32::from_rgb(255, 255, 255),
+        }
+    }
+
+    pub fn tab_text(self, active: bool) -> Color32 {
+        match (self, active) {
+            (Self::Dark, true) => Color32::from_rgb(214, 220, 232),
+            (Self::Dark, false) => Color32::from_rgb(166, 175, 190),
+            (Self::Light, true) => Color32::from_rgb(28, 43, 61),
+            (Self::Light, false) => Color32::from_rgb(92, 103, 118),
+        }
+    }
+
+    pub fn status_background(self) -> Color32 {
+        match self {
+            Self::Dark => Color32::from_rgb(32, 37, 46),
+            Self::Light => Color32::from_rgb(234, 239, 246),
         }
     }
 }
@@ -153,6 +187,8 @@ pub struct Interface {
     pub enable_status_bar: bool,
     pub tab_height: f32,
     pub tab_max_chars: usize,
+    pub tab_font_size: f32,
+    pub tab_min_width: f32,
     pub tab_new_button: bool,
     pub editor_padding: i8,
 }
@@ -166,6 +202,8 @@ impl Default for Interface {
             enable_status_bar: false,
             tab_height: 36.0,
             tab_max_chars: 28,
+            tab_font_size: 12.0,
+            tab_min_width: 96.0,
             tab_new_button: true,
             editor_padding: 18,
         }
@@ -435,6 +473,12 @@ impl Config {
         if !(8..=128).contains(&config.interface.tab_max_chars) {
             return Err("interface.tab_max_chars must be between 8 and 128".into());
         }
+        if !(9.0..=20.0).contains(&config.interface.tab_font_size) {
+            return Err("interface.tab_font_size must be between 9 and 20".into());
+        }
+        if !(60.0..=260.0).contains(&config.interface.tab_min_width) {
+            return Err("interface.tab_min_width must be between 60 and 260".into());
+        }
         if !(0..=64).contains(&config.interface.editor_padding) {
             return Err("interface.editor_padding must be between 0 and 64".into());
         }
@@ -529,5 +573,27 @@ mod tests {
         assert_eq!(config.interface.tab_max_chars, 32);
         assert_eq!(config.interface.editor_padding, 8);
     }
+
+    #[test]
+    fn dark_palette_matches_tab_reference() {
+        assert_eq!(Theme::Dark.tabs_background(), Color32::from_rgb(27, 30, 37));
+        assert_eq!(Theme::Dark.active_tab_background(), Color32::from_rgb(41, 45, 54));
+        assert_eq!(Theme::Dark.terminal_background(), Color32::from_rgb(23, 27, 34));
+        assert_eq!(Theme::Dark.status_background(), Color32::from_rgb(32, 37, 46));
+        assert_ne!(Theme::Light.tabs_background(), Theme::Dark.tabs_background());
+    }
+
+    #[test]
+    fn configurable_tab_dimensions_validate() {
+        assert!(Config::parse("[interface]\ntab_font_size = 8.0").is_err());
+        assert!(Config::parse("[interface]\ntab_min_width = 40.0").is_err());
+        let config = Config::parse(
+            "[interface]\ntab_font_size = 13.0\ntab_min_width = 120.0",
+        )
+        .unwrap();
+        assert_eq!(config.interface.tab_font_size, 13.0);
+        assert_eq!(config.interface.tab_min_width, 120.0);
+    }
+
 
 }
