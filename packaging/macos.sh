@@ -12,7 +12,7 @@ lipo -create \
     target/aarch64-apple-darwin/release/synth \
     target/x86_64-apple-darwin/release/synth \
     -output "$app/Contents/MacOS/synth"
-lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/synth"
+lipo "$app/Contents/MacOS/synth" -verify_arch arm64 x86_64
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
