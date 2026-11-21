@@ -85,14 +85,14 @@ impl Synth {
             maximize_on_startup: true,
         };
         app.bindings = app.config.bindings(&app.config_path).unwrap_or_default();
-        ctx.set_visuals(app.config.editor.theme.visuals());
+        ctx.set_visuals(app.config.palette().visuals(app.config.editor.theme));
         let _ = app.reload_config(ctx);
         app
     }
 
     fn reload_config(&mut self, ctx: &egui::Context) -> Reply {
         let result = Config::load(&self.config_path).map(|(config, bindings)| {
-            ctx.set_visuals(config.editor.theme.visuals());
+            ctx.set_visuals(config.palette().visuals(config.editor.theme));
             self.bindings = bindings;
             self.config = config;
             self.terminal_error = None;
@@ -233,7 +233,7 @@ impl Synth {
             Side::Left => egui::SidePanel::left("terminal"),
             Side::Right => egui::SidePanel::right("terminal"),
         };
-        let background = self.config.editor.theme.terminal_background();
+        let background = self.config.palette().terminal_background;
         panel
             .resizable(false)
             .show_separator_line(false)
@@ -365,8 +365,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             AttachConsole(ATTACH_PARENT_PROCESS);
         }
         let installation = config::installation_path()?;
-        if args == ["--help"] || args == ["-h"] {
-            println!("{}", command::USAGE);
+        if args.len() == 1
+            && matches!(args[0].to_str(), Some("help" | "--help" | "-h"))
+        {
+            print!("{}", command::help());
             return Ok(());
         }
         let config_path = Config::path(&installation)?;

@@ -22,6 +22,7 @@ pub type Bindings = Vec<(egui::KeyboardShortcut, Command)>;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub editor: Editor,
+    pub colors: Colors,
     pub terminal: Terminal,
     pub interface: Interface,
     pub animations: Animations,
@@ -52,67 +53,176 @@ pub enum Theme {
     Light,
 }
 
-impl Theme {
-    pub fn visuals(self) -> egui::Visuals {
-        let (mut visuals, background, foreground, selection, subdued) = match self {
-            Self::Dark => (
-                egui::Visuals::dark(),
-                Color32::from_rgb(17, 19, 24),
-                Color32::from_rgb(214, 220, 232),
-                Color32::from_rgb(55, 63, 80),
-                Color32::from_rgb(27, 30, 37),
-            ),
-            Self::Light => (
-                egui::Visuals::light(),
-                Color32::from_rgb(246, 249, 253),
-                Color32::from_rgb(28, 43, 61),
-                Color32::from_rgb(179, 214, 247),
-                Color32::from_rgb(234, 239, 246),
-            ),
+#[derive(Clone, Copy)]
+struct HexColor(Color32);
+
+impl<'de> Deserialize<'de> for HexColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let hex = value
+            .strip_prefix('#')
+            .filter(|hex| hex.len() == 6)
+            .ok_or_else(|| serde::de::Error::custom("Expected a color in #RRGGBB format"))?;
+        let rgb = u32::from_str_radix(hex, 16)
+            .map_err(|_| serde::de::Error::custom("Expected a color in #RRGGBB format"))?;
+        Ok(Self(Color32::from_rgb(
+            (rgb >> 16) as u8,
+            (rgb >> 8) as u8,
+            rgb as u8,
+        )))
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Colors {
+    dark: ColorOverrides,
+    light: ColorOverrides,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ColorOverrides {
+    editor_background: Option<HexColor>,
+    foreground: Option<HexColor>,
+    selection: Option<HexColor>,
+    muted_surface: Option<HexColor>,
+    terminal_background: Option<HexColor>,
+    tabs_background: Option<HexColor>,
+    active_tab_background: Option<HexColor>,
+    tab_text_active: Option<HexColor>,
+    tab_text_inactive: Option<HexColor>,
+    status_background: Option<HexColor>,
+    window_dot_red: Option<HexColor>,
+    window_dot_yellow: Option<HexColor>,
+    window_dot_green: Option<HexColor>,
+}
+
+#[derive(Clone, Copy)]
+pub struct Palette {
+    pub editor_background: Color32,
+    pub foreground: Color32,
+    pub selection: Color32,
+    pub muted_surface: Color32,
+    pub terminal_background: Color32,
+    pub tabs_background: Color32,
+    pub active_tab_background: Color32,
+    pub tab_text_active: Color32,
+    pub tab_text_inactive: Color32,
+    pub status_background: Color32,
+    pub window_dot_red: Color32,
+    pub window_dot_yellow: Color32,
+    pub window_dot_green: Color32,
+}
+
+impl Palette {
+    fn defaults(theme: Theme) -> Self {
+        match theme {
+            Theme::Dark => Self {
+                editor_background: Color32::from_rgb(17, 19, 24),
+                foreground: Color32::from_rgb(214, 220, 232),
+                selection: Color32::from_rgb(55, 63, 80),
+                muted_surface: Color32::from_rgb(27, 30, 37),
+                terminal_background: Color32::from_rgb(23, 27, 34),
+                tabs_background: Color32::from_rgb(27, 30, 37),
+                active_tab_background: Color32::from_rgb(41, 45, 54),
+                tab_text_active: Color32::from_rgb(214, 220, 232),
+                tab_text_inactive: Color32::from_rgb(166, 175, 190),
+                status_background: Color32::from_rgb(32, 37, 46),
+                window_dot_red: Color32::from_rgb(240, 137, 142),
+                window_dot_yellow: Color32::from_rgb(239, 198, 106),
+                window_dot_green: Color32::from_rgb(131, 204, 176),
+            },
+            Theme::Light => Self {
+                editor_background: Color32::from_rgb(246, 249, 253),
+                foreground: Color32::from_rgb(28, 43, 61),
+                selection: Color32::from_rgb(179, 214, 247),
+                muted_surface: Color32::from_rgb(234, 239, 246),
+                terminal_background: Color32::from_rgb(234, 241, 249),
+                tabs_background: Color32::from_rgb(230, 235, 243),
+                active_tab_background: Color32::from_rgb(255, 255, 255),
+                tab_text_active: Color32::from_rgb(28, 43, 61),
+                tab_text_inactive: Color32::from_rgb(92, 103, 118),
+                status_background: Color32::from_rgb(234, 239, 246),
+                window_dot_red: Color32::from_rgb(240, 137, 142),
+                window_dot_yellow: Color32::from_rgb(239, 198, 106),
+                window_dot_green: Color32::from_rgb(131, 204, 176),
+            },
+        }
+    }
+
+    pub fn visuals(self, theme: Theme) -> egui::Visuals {
+        let mut visuals = match theme {
+            Theme::Dark => egui::Visuals::dark(),
+            Theme::Light => egui::Visuals::light(),
         };
-        visuals.panel_fill = background;
-        visuals.override_text_color = Some(foreground);
-        visuals.selection.bg_fill = selection;
-        visuals.extreme_bg_color = background;
-        visuals.faint_bg_color = subdued;
+        visuals.panel_fill = self.editor_background;
+        visuals.override_text_color = Some(self.foreground);
+        visuals.selection.bg_fill = self.selection;
+        visuals.extreme_bg_color = self.editor_background;
+        visuals.faint_bg_color = self.muted_surface;
         visuals
     }
 
-    pub fn terminal_background(self) -> Color32 {
-        match self {
-            Self::Dark => Color32::from_rgb(23, 27, 34),
-            Self::Light => Color32::from_rgb(234, 241, 249),
-        }
-    }
-
-    pub fn tabs_background(self) -> Color32 {
-        match self {
-            Self::Dark => Color32::from_rgb(27, 30, 37),
-            Self::Light => Color32::from_rgb(230, 235, 243),
-        }
-    }
-
-    pub fn active_tab_background(self) -> Color32 {
-        match self {
-            Self::Dark => Color32::from_rgb(41, 45, 54),
-            Self::Light => Color32::from_rgb(255, 255, 255),
-        }
-    }
-
     pub fn tab_text(self, active: bool) -> Color32 {
-        match (self, active) {
-            (Self::Dark, true) => Color32::from_rgb(214, 220, 232),
-            (Self::Dark, false) => Color32::from_rgb(166, 175, 190),
-            (Self::Light, true) => Color32::from_rgb(28, 43, 61),
-            (Self::Light, false) => Color32::from_rgb(92, 103, 118),
+        if active {
+            self.tab_text_active
+        } else {
+            self.tab_text_inactive
         }
     }
+}
 
-    pub fn status_background(self) -> Color32 {
-        match self {
-            Self::Dark => Color32::from_rgb(32, 37, 46),
-            Self::Light => Color32::from_rgb(234, 239, 246),
+impl Colors {
+    fn palette(&self, theme: Theme) -> Palette {
+        let overrides = match theme {
+            Theme::Dark => &self.dark,
+            Theme::Light => &self.light,
+        };
+        let mut palette = Palette::defaults(theme);
+        if let Some(value) = overrides.editor_background {
+            palette.editor_background = value.0;
         }
+        if let Some(value) = overrides.foreground {
+            palette.foreground = value.0;
+        }
+        if let Some(value) = overrides.selection {
+            palette.selection = value.0;
+        }
+        if let Some(value) = overrides.muted_surface {
+            palette.muted_surface = value.0;
+        }
+        if let Some(value) = overrides.terminal_background {
+            palette.terminal_background = value.0;
+        }
+        if let Some(value) = overrides.tabs_background {
+            palette.tabs_background = value.0;
+        }
+        if let Some(value) = overrides.active_tab_background {
+            palette.active_tab_background = value.0;
+        }
+        if let Some(value) = overrides.tab_text_active {
+            palette.tab_text_active = value.0;
+        }
+        if let Some(value) = overrides.tab_text_inactive {
+            palette.tab_text_inactive = value.0;
+        }
+        if let Some(value) = overrides.status_background {
+            palette.status_background = value.0;
+        }
+        if let Some(value) = overrides.window_dot_red {
+            palette.window_dot_red = value.0;
+        }
+        if let Some(value) = overrides.window_dot_yellow {
+            palette.window_dot_yellow = value.0;
+        }
+        if let Some(value) = overrides.window_dot_green {
+            palette.window_dot_green = value.0;
+        }
+        palette
     }
 }
 
@@ -341,6 +451,10 @@ fn user_home() -> io::Result<PathBuf> {
 }
 
 impl Config {
+    pub fn palette(&self) -> Palette {
+        self.colors.palette(self.editor.theme)
+    }
+
     pub fn path(_installation: &Path) -> io::Result<PathBuf> {
         #[cfg(windows)]
         return Ok(_installation.with_file_name("config.toml"));
@@ -577,11 +691,50 @@ mod tests {
 
     #[test]
     fn dark_palette_matches_tab_reference() {
-        assert_eq!(Theme::Dark.tabs_background(), Color32::from_rgb(27, 30, 37));
-        assert_eq!(Theme::Dark.active_tab_background(), Color32::from_rgb(41, 45, 54));
-        assert_eq!(Theme::Dark.terminal_background(), Color32::from_rgb(23, 27, 34));
-        assert_eq!(Theme::Dark.status_background(), Color32::from_rgb(32, 37, 46));
-        assert_ne!(Theme::Light.tabs_background(), Theme::Dark.tabs_background());
+        let dark = Palette::defaults(Theme::Dark);
+        let light = Palette::defaults(Theme::Light);
+        assert_eq!(dark.tabs_background, Color32::from_rgb(27, 30, 37));
+        assert_eq!(dark.active_tab_background, Color32::from_rgb(41, 45, 54));
+        assert_eq!(dark.terminal_background, Color32::from_rgb(23, 27, 34));
+        assert_eq!(dark.status_background, Color32::from_rgb(32, 37, 46));
+        assert_ne!(light.tabs_background, dark.tabs_background);
+    }
+
+    #[test]
+    fn palette_overrides_are_partial_and_theme_specific() {
+        let config = Config::parse(
+            "[colors.dark]\neditor_background = '#12A0ef'\ntab_text_inactive = '#000000'\n[colors.light]\neditor_background = '#445566'",
+        )
+        .unwrap();
+        let dark = config.colors.palette(Theme::Dark);
+        let light = config.colors.palette(Theme::Light);
+        assert_eq!(dark.editor_background, Color32::from_rgb(18, 160, 239));
+        assert_eq!(dark.tab_text_inactive, Color32::BLACK);
+        assert_eq!(dark.terminal_background, Palette::defaults(Theme::Dark).terminal_background);
+        assert_eq!(light.editor_background, Color32::from_rgb(68, 85, 102));
+        assert_eq!(light.tab_text_inactive, Palette::defaults(Theme::Light).tab_text_inactive);
+    }
+
+    #[test]
+    fn invalid_hex_colors_are_rejected() {
+        for color in ["'123456'", "'#12345'", "'#GG0000'", "'#12345678'", "42"] {
+            let source = format!("[colors.dark]\neditor_background = {color}");
+            assert!(Config::parse(&source).is_err(), "{color}");
+        }
+        assert!(Config::parse("[colors.dark]\nunknown = '#010203'").is_err());
+        assert!(Config::parse("[colors.unknown]").is_err());
+    }
+
+    #[test]
+    fn sample_preserves_original_palettes() {
+        let config = Config::parse(include_str!("../config.toml")).unwrap();
+        let dark = config.colors.palette(Theme::Dark);
+        let light = config.colors.palette(Theme::Light);
+        assert_eq!(dark.editor_background, Palette::defaults(Theme::Dark).editor_background);
+        assert_eq!(dark.terminal_background, Palette::defaults(Theme::Dark).terminal_background);
+        assert_eq!(dark.window_dot_green, Palette::defaults(Theme::Dark).window_dot_green);
+        assert_eq!(light.editor_background, Palette::defaults(Theme::Light).editor_background);
+        assert_eq!(light.active_tab_background, Palette::defaults(Theme::Light).active_tab_background);
     }
 
     #[test]

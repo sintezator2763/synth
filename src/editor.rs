@@ -167,9 +167,9 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
     if height <= 0.0 {
         return None;
     }
-    let theme = config.editor.theme;
+    let palette = config.palette();
     egui::TopBottomPanel::top("tabs")
-        .frame(egui::Frame::NONE.fill(theme.tabs_background()))
+        .frame(egui::Frame::NONE.fill(palette.tabs_background))
         .exact_height(height)
         .show(ctx, |ui| {
             let mut area = ui.max_rect().shrink2(egui::vec2(10.0, 0.0));
@@ -182,9 +182,9 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
             bar.spacing_mut().item_spacing.x = 0.0;
             bar.add_space(8.0);
             for color in [
-                Color32::from_rgb(240, 137, 142),
-                Color32::from_rgb(239, 198, 106),
-                Color32::from_rgb(131, 204, 176),
+                palette.window_dot_red,
+                palette.window_dot_yellow,
+                palette.window_dot_green,
             ] {
                 let (rect, _) =
                     bar.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
@@ -195,7 +195,7 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                 RichText::new("synth")
                     .monospace()
                     .size(config.interface.tab_font_size)
-                    .color(theme.tab_text(false)),
+                    .color(palette.tab_text(false)),
             );
             bar.add_space(62.0);
             let mut action = None;
@@ -205,9 +205,9 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                     ui.spacing_mut().item_spacing.x = 6.0;
                     for (index, document) in documents.items.iter().enumerate() {
                         let active = index == documents.active;
-                        let foreground = theme.tab_text(active);
+                        let foreground = palette.tab_text(active);
                         let fill = if active {
-                            theme.active_tab_background()
+                            palette.active_tab_background
                         } else {
                             Color32::TRANSPARENT
                         };
@@ -282,7 +282,7 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
         return;
     }
     egui::TopBottomPanel::bottom("status")
-        .frame(egui::Frame::NONE.fill(config.editor.theme.status_background()))
+        .frame(egui::Frame::NONE.fill(config.palette().status_background))
         .exact_height(height)
         .show(ctx, |ui| {
             let mut area = ui.max_rect().shrink2(egui::vec2(12.0, 0.0));

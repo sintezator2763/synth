@@ -15,6 +15,36 @@ tab_font_size = 12.0
 tab_min_width = 96.0
 editor_padding = 18
 
+[colors.dark]
+editor_background = "#111318"
+foreground = "#D6DCE8"
+selection = "#373F50"
+muted_surface = "#1B1E25"
+terminal_background = "#171B22"
+tabs_background = "#1B1E25"
+active_tab_background = "#292D36"
+tab_text_active = "#D6DCE8"
+tab_text_inactive = "#A6AFBE"
+status_background = "#20252E"
+window_dot_red = "#F0898E"
+window_dot_yellow = "#EFC66A"
+window_dot_green = "#83CCB0"
+
+[colors.light]
+editor_background = "#F6F9FD"
+foreground = "#1C2B3D"
+selection = "#B3D6F7"
+muted_surface = "#EAEFF6"
+terminal_background = "#EAF1F9"
+tabs_background = "#E6EBF3"
+active_tab_background = "#FFFFFF"
+tab_text_active = "#1C2B3D"
+tab_text_inactive = "#5C6776"
+status_background = "#EAEFF6"
+window_dot_red = "#F0898E"
+window_dot_yellow = "#EFC66A"
+window_dot_green = "#83CCB0"
+
 [terminal]
 side = "right" # right, left
 width_fraction = 0.44 # fraction of the window, from 0.15 to 0.85

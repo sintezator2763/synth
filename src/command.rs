@@ -53,7 +53,60 @@ pub enum Command {
     ConfigReload,
 }
 
-pub const USAGE: &str = "Usage: synth [open PATH | new | save | saveas PATH | close [-d|--discard] | properties | tab list|next|prev | find TEXT|next | terminal toggle|image PATH | focus toggle | config path|check|reload]";
+pub const USAGE: &str = "Usage: synth COMMAND [ARGS]\nRun 'synth help' for a list of commands.";
+
+pub fn help() -> String {
+    use std::fmt::Write as _;
+
+    const SECTIONS: &[(&str, &[(&str, &str)])] = &[
+        ("DOCUMENTS", &[
+            ("new", "Create an untitled document"),
+            ("open PATH", "Open a file or switch to it"),
+            ("save", "Save the active document"),
+            ("saveas PATH", "Save the active document to PATH"),
+            ("close", "Close an unchanged document"),
+            ("close --discard", "Close without saving changes"),
+            ("properties", "Show file information"),
+        ]),
+        ("TABS", &[
+            ("tab list", "List all open documents"),
+            ("tab next", "Switch to the next tab"),
+            ("tab prev", "Switch to the previous tab"),
+        ]),
+        ("SEARCH", &[
+            ("find TEXT", "Find the first occurrence"),
+            ("find next", "Find the next occurrence"),
+            ("find -- next", "Find the literal word \"next\""),
+        ]),
+        ("TERMINAL", &[
+            ("terminal toggle", "Show or hide the terminal"),
+            ("terminal image PATH", "Display a PNG or JPEG in the terminal"),
+            ("focus toggle", "Switch focus between editor and terminal"),
+        ]),
+        ("CONFIGURATION", &[
+            ("config path", "Print the configuration path"),
+            ("config check", "Validate the configuration"),
+            ("config reload", "Reload configuration from disk"),
+        ]),
+        ("GENERAL", &[
+            ("help", "Display this help"),
+            ("-h, --help", "Display this help"),
+        ]),
+    ];
+    let mut output = String::from("Synth - terminal-driven text editor\n\nUsage: synth COMMAND [ARGS]\n\n");
+    for &(title, commands) in SECTIONS {
+        output.push_str(title);
+        output.push('\n');
+        for &(command, description) in commands {
+            writeln!(output, "  {command:<22}  {description}").unwrap();
+        }
+        output.push('\n');
+    }
+    output.push_str(
+        "Shortcuts are configured in config.toml.\nCommands other than help and config path/check require a running Synth window.\n",
+    );
+    output
+}
 
 impl Command {
     pub fn parse(args: &[OsString], directory: &Path) -> Result<Self, String> {
@@ -340,6 +393,32 @@ impl Write for PipeIo<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_lists_commands_in_aligned_columns() {
+        let printed = help();
+        for command in [
+            "new",
+            "open PATH",
+            "saveas PATH",
+            "close --discard",
+            "tab next",
+            "find -- next",
+            "terminal image PATH",
+            "config check",
+            "-h, --help",
+        ] {
+            assert!(printed.lines().any(|line| line.starts_with(&format!("  {command}"))));
+        }
+        let rows = printed
+            .lines()
+            .filter(|line| line.starts_with("  "))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 21);
+        for row in rows {
+            assert_eq!(&row[24..26], "  ");
+        }
+    }
 
     #[test]
     fn open_joins_unquoted_path_words_and_preserves_one_quoted_argument() {
