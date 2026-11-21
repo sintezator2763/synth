@@ -9,11 +9,22 @@ use alacritty_terminal::{
     event::{OnResize, WindowSize},
     tty::{self, ChildEvent, EventedPty, EventedReadWrite},
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine, alphabet,
+    engine::{
+        DecodePaddingMode,
+        general_purpose::{GeneralPurpose, GeneralPurposeConfig},
+    },
+};
 use eframe::egui::{
     self, Color32, ColorImage, Context, Painter, Rect, TextureHandle, TextureOptions, Vec2,
 };
 use polling::{Event, PollMode, Poller};
+
+const KITTY_BASE64: GeneralPurpose = GeneralPurpose::new(
+    &alphabet::STANDARD,
+    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
+);
 
 pub const MARKER: &str = "Synth:KittyGraphics";
 const REPORT_POSITION: &[u8] = b"\x1b[22t\x1b]2;Synth:KittyGraphics\x07\x1b[6n\x1b[23t";
@@ -600,7 +611,7 @@ fn reply(metadata: &Metadata, result: Result<(), &'static str>) -> Option<String
 }
 
 fn decode(metadata: &Metadata, input: &[u8]) -> Result<ColorImage, &'static str> {
-    let mut bytes = STANDARD
+    let mut bytes = KITTY_BASE64
         .decode(input)
         .map_err(|_| "EINVAL: Invalid base64 image data")?;
     match metadata.get(b'o') {
@@ -671,6 +682,13 @@ fn decode_image<R: BufRead + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_unpadded_graphics_data_written_by_kitten() {
+        let packet = assemble(&mut None, b"a=T,f=32,s=1,v=1;/xAg/w").unwrap();
+        let image = decode(&packet.metadata, &packet.data).unwrap();
+        assert_eq!(image.pixels, [Color32::from_rgb(255, 16, 32)]);
+    }
 
     #[test]
     fn graphics_packets_survive_fragmented_pty_reads_without_consuming_text() {
