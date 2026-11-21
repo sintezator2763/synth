@@ -1,6 +1,6 @@
 use std::{
     collections::hash_map::DefaultHasher,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     hash::{Hash, Hasher},
     io::{self, Read, Write},
     path::Path,
@@ -59,10 +59,10 @@ impl Command {
     pub fn parse(args: &[OsString], directory: &Path) -> Result<Self, String> {
         let word = |index: usize| args.get(index).and_then(|arg| arg.to_str()).unwrap_or("");
         match (args.len(), word(0), word(1)) {
-            (2, "open", _) => Ok(Self::Open(directory.join(&args[1]).into_os_string())),
+            (2.., "open", _) => path_argument(directory, &args[1..]).map(Self::Open),
             (1, "new", _) => Ok(Self::New),
             (1, "save", _) => Ok(Self::Save),
-            (2, "saveas", _) => Ok(Self::SaveAs(directory.join(&args[1]).into_os_string())),
+            (2.., "saveas", _) => path_argument(directory, &args[1..]).map(Self::SaveAs),
             (1, "close", _) => Ok(Self::Close { discard: false }),
             (2, "close", "-d" | "--discard") => Ok(Self::Close { discard: true }),
             (1, "properties", _) => Ok(Self::Properties),
@@ -73,9 +73,9 @@ impl Command {
             (2, "find", text) if !text.is_empty() => Ok(Self::Find(text.into())),
             (3, "find", "--") if !word(2).is_empty() => Ok(Self::Find(word(2).into())),
             (2, "terminal", "toggle") => Ok(Self::ToggleTerminal),
-            (3, "terminal", "image") => Ok(Self::TerminalImage(
-                directory.join(&args[2]).into_os_string(),
-            )),
+            (3.., "terminal", "image") => {
+                path_argument(directory, &args[2..]).map(Self::TerminalImage)
+            }
             (2, "focus", "toggle") => Ok(Self::ToggleFocus),
             (2, "config", "path") => Ok(Self::ConfigPath),
             (2, "config", "check") => Ok(Self::ConfigCheck),
@@ -83,6 +83,14 @@ impl Command {
             _ => Err(USAGE.into()),
         }
     }
+}
+
+fn path_argument(directory: &Path, parts: &[OsString]) -> Result<OsString, String> {
+    let path = parts.join(OsStr::new(" "));
+    if path.is_empty() {
+        return Err("A file path is required".into());
+    }
+    Ok(directory.join(path).into_os_string())
 }
 
 pub type Reply = Result<String, String>;
@@ -150,9 +158,15 @@ fn listener_options(name: Name<'static>) -> io::Result<ListenerOptions<'static>>
 }
 
 pub fn dispatch(installation: &Path, command: &Command) -> Reply {
-    let mut stream = Stream::connect(socket_name(installation).map_err(|error| error.to_string())?)
-        .map_err(|error| format!("Could not connect to the running Synth: {error}"))?;
-    exchange(&mut stream, command).map_err(|error| error.to_string())?
+    let mut stream =
+        Stream::connect(socket_name(installation).map_err(|error| crate::io_message(&error))?)
+            .map_err(|error| {
+                format!(
+                    "Could not connect to the running Synth: {}",
+                    crate::io_message(&error)
+                )
+            })?;
+    exchange(&mut stream, command).map_err(|error| crate::io_message(&error))?
 }
 
 fn exchange(stream: &mut Stream, command: &Command) -> io::Result<Reply> {
@@ -328,15 +342,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn open_joins_unquoted_path_words_and_preserves_one_quoted_argument() {
+        let root = Path::new("documents");
+        let words = ["open", "Project", "Notes.txt"].map(OsString::from);
+        assert!(matches!(
+            Command::parse(&words, root),
+            Ok(Command::Open(path)) if path == root.join("Project Notes.txt").into_os_string()
+        ));
+        let quoted = ["open", "Project  Notes.txt"].map(OsString::from);
+        assert!(matches!(
+            Command::parse(&quoted, root),
+            Ok(Command::Open(path)) if path == root.join("Project  Notes.txt").into_os_string()
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rooted_forward_slash_path_keeps_the_callers_drive() {
+        let root = Path::new("C:/Users/Someone");
+        let words = ["open", "/Work/Project", "Notes.txt"].map(OsString::from);
+        assert!(matches!(
+            Command::parse(&words, root),
+            Ok(Command::Open(path)) if Path::new(&path) == Path::new("C:/Work/Project Notes.txt")
+        ));
+    }
+
+    #[test]
     fn unicode_open_and_close_round_trip_over_local_transport() {
         let directory = tempfile::tempdir().unwrap();
         let installation = directory.path().join("synth");
-        let path = directory.path().join("фаел.txt").into_os_string();
+        let path = directory.path().join("caf\u{e9} file.txt").into_os_string();
         let requests = listen(&installation, egui::Context::default()).unwrap();
         let server = std::thread::spawn(move || {
             let request = requests.recv_timeout(Duration::from_secs(3)).unwrap();
             assert!(matches!(request.command, Command::Open(opened) if opened == path));
-            request.respond.send(Ok("Открыт".into())).unwrap();
+            request.respond.send(Ok("Opened".into())).unwrap();
             let request = requests.recv_timeout(Duration::from_secs(3)).unwrap();
             assert!(matches!(request.command, Command::Close { discard: true }));
             request
@@ -347,9 +387,9 @@ mod tests {
         assert_eq!(
             dispatch(
                 &installation,
-                &Command::Open(directory.path().join("фаел.txt").into_os_string())
+                &Command::Open(directory.path().join("caf\u{e9} file.txt").into_os_string())
             ),
-            Ok("Открыт".into())
+            Ok("Opened".into())
         );
         assert_eq!(
             dispatch(&installation, &Command::Close { discard: true }),

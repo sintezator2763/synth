@@ -13,6 +13,7 @@ use serde::Deserialize;
 use crate::{
     animation::{Animation, Direction, Style},
     command::Command,
+    cursor_trail,
 };
 
 pub type Bindings = Vec<(egui::KeyboardShortcut, Command)>;
@@ -24,6 +25,7 @@ pub struct Config {
     pub terminal: Terminal,
     pub interface: Interface,
     pub animations: Animations,
+    pub cursor_trail: cursor_trail::Settings,
     keybindings: Option<BTreeMap<String, String>>,
 }
 
@@ -185,7 +187,7 @@ pub struct Animations {
 impl Default for Animations {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             terminal: None,
             tabs: Animation::default(),
             line_numbers: Animation::default(),
@@ -336,7 +338,7 @@ impl Config {
                 Self::parse(&source).map_err(|error| format!("{}: {error}", path.display()))?
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
-            Err(error) => return Err(format!("{}: {error}", path.display())),
+            Err(error) => return Err(format!("{}: {}", path.display(), crate::io_message(&error))),
         };
         let bindings = config
             .bindings(path)
@@ -420,6 +422,7 @@ impl Config {
             return Err("terminal.args requires terminal.shell".into());
         }
         config.terminal.shortcut()?;
+        config.cursor_trail.validate()?;
         Ok(config)
     }
 }
@@ -432,6 +435,12 @@ mod tests {
     fn example_uses_default_shortcut_and_panel() {
         let config = Config::parse(include_str!("../config.toml")).unwrap();
         assert!(matches!(config.terminal.side, Side::Right));
+        assert!(!config.animations.enabled);
+        assert_eq!(config.cursor_trail.target, cursor_trail::Target::None);
+        assert!(!config.interface.enable_tabs);
+        assert!(!config.interface.enable_line_numbers);
+        assert!(!config.interface.enable_syntax_highlighting);
+        assert!(!config.interface.enable_status_bar);
         assert_eq!(
             config
                 .bindings(Path::new("/tmp/config.toml"))

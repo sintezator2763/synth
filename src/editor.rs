@@ -8,12 +8,14 @@ use syntect::{
 
 use crate::{
     config::{Config, Theme},
+    cursor_trail::{Cursor, Target, Trail},
     document::{Document, Documents},
 };
 
 #[derive(Default)]
 pub struct Editor {
     syntax: Option<SyntaxLayouts>,
+    trail: Trail,
 }
 
 impl Editor {
@@ -87,6 +89,32 @@ impl Editor {
             if let Some(range) = output.cursor_range {
                 document.cursor = range.primary.ccursor.index;
             }
+            let cursor_style = ui.visuals().text_cursor.stroke;
+            let cursor = if config.cursor_trail.enabled_for(Target::Editor)
+                && output.response.has_focus()
+                && let Some(range) = output.cursor_range
+            {
+                let caret = output.galley.pos_from_cursor(&range.primary);
+                let rect = egui::Rect::from_center_size(
+                    caret.center(),
+                    egui::vec2(cursor_style.width.max(1.0), caret.height()),
+                );
+                let cell_width = ui.fonts(|fonts| fonts.glyph_width(&font, 'M'));
+                Some(Cursor {
+                    surface: id,
+                    rect,
+                    origin: output.galley_pos.to_vec2(),
+                    cell: egui::vec2(cell_width, caret.height()),
+                    color: cursor_style.color,
+                })
+            } else {
+                None
+            };
+            self.trail.draw(
+                &ui.painter().with_clip_rect(output.text_clip_rect),
+                &config.cursor_trail,
+                cursor,
+            );
             if let Some(range) = selected {
                 let cursor = output.galley.from_ccursor(CCursor::new(range.end));
                 ui.scroll_to_rect(

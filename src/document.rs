@@ -162,7 +162,7 @@ impl Document {
 }
 
 fn file_error(path: &Path, error: io::Error) -> String {
-    format!("{}: {error}", path.display())
+    format!("{}: {}", path.display(), crate::io_message(&error))
 }
 
 fn read_file(path: &Path) -> Result<(String, bool), String> {
@@ -286,7 +286,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("original.txt");
         let copy = directory.path().join("copy.txt");
-        fs::write(&source, "\u{feff}Привет\r\n").unwrap();
+        fs::write(&source, "\u{feff}caf\u{e9}\r\n").unwrap();
 
         let mut documents = Documents::default();
         documents.open(&source).unwrap();
@@ -295,7 +295,7 @@ mod tests {
         documents.save(None).unwrap();
         assert_eq!(
             fs::read_to_string(&source).unwrap(),
-            "\u{feff}Привет\r\nhello"
+            "\u{feff}caf\u{e9}\r\nhello"
         );
 
         fs::write(&source, "External").unwrap();
@@ -303,7 +303,7 @@ mod tests {
         documents.save(Some(&copy)).unwrap();
         assert_eq!(
             fs::read_to_string(&copy).unwrap(),
-            "\u{feff}Привет\r\nhello"
+            "\u{feff}caf\u{e9}\r\nhello"
         );
         assert!(documents.save(Some(&source)).is_err());
         assert_eq!(fs::read_to_string(&source).unwrap(), "External");

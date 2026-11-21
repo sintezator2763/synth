@@ -3,13 +3,14 @@
 mod animation;
 mod command;
 mod config;
+mod cursor_trail;
 mod document;
 mod editor;
 mod graphics;
 mod terminal;
 
 use std::{
-    env,
+    env, io,
     path::{Path, PathBuf},
     process::ExitCode,
     sync::mpsc,
@@ -48,14 +49,21 @@ impl Synth {
     fn new(ctx: &egui::Context, installation: PathBuf, config_path: PathBuf) -> Self {
         let setup_error = Config::ensure_file(&config_path, &installation)
             .err()
-            .map(|error| format!("Could not create {}: {error}", config_path.display()));
+            .map(|error| {
+                format!(
+                    "Could not create {}: {}",
+                    config_path.display(),
+                    io_message(&error)
+                )
+            });
         let (watcher, watch_error) = match ConfigWatch::new(&config_path, ctx.clone()) {
             Ok(watcher) => (Some(watcher), None),
             Err(error) => (None, Some(format!("Config watcher: {error}"))),
         };
         let commands = command::listen(&installation, ctx.clone()).map_err(|error| {
-            eprintln!("Synth command listener: {error}");
-            format!("Synth command listener: {error}")
+            let message = io_message(&error);
+            eprintln!("Synth command listener: {message}");
+            format!("Synth command listener: {message}")
         });
         let mut app = Self {
             config: Config::default(),
@@ -210,6 +218,9 @@ impl Synth {
             self.config.animations.enabled,
         );
         if progress == 0.0 {
+            if let Some(terminal) = &mut self.terminal {
+                terminal.clear_cursor_trail();
+            }
             return;
         }
 
@@ -236,7 +247,7 @@ impl Synth {
                 if self.terminal_open && self.terminal.is_none() && self.terminal_error.is_none() {
                     match Terminal::start(ui, rect, &self.config.terminal) {
                         Ok(terminal) => self.terminal = Some(terminal),
-                        Err(error) => self.terminal_error = Some(error.to_string()),
+                        Err(error) => self.terminal_error = Some(io_message(&error)),
                     }
                 }
                 if let Some(terminal) = &mut self.terminal {
@@ -247,8 +258,8 @@ impl Synth {
                         rect,
                         self.terminal_open && self.pending_focus.take() == Some(Focus::Terminal),
                         self.terminal_open,
-                        foreground,
-                        background,
+                        (foreground, background),
+                        &self.config.cursor_trail,
                     );
                     if exited {
                         self.terminal = None;
@@ -327,7 +338,7 @@ impl eframe::App for Synth {
 }
 
 fn check_config(path: &Path) -> Reply {
-    if !path.try_exists().map_err(|error| error.to_string())? {
+    if !path.try_exists().map_err(|error| io_message(&error))? {
         return Err(format!(
             "Config not found: {}. Launch Synth to create it.",
             path.display()
@@ -389,11 +400,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn io_message(error: &io::Error) -> String {
+    if let Some(code) = error.raw_os_error() {
+        format!("{} (OS error {code})", io::Error::from(error.kind()))
+    } else {
+        error.to_string()
+    }
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Synth: {error}");
+            if let Some(error) = error.downcast_ref::<io::Error>() {
+                eprintln!("Synth: {}", io_message(error));
+            } else {
+                eprintln!("Synth: {error}");
+            }
             ExitCode::FAILURE
         }
     }

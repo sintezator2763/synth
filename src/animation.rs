@@ -61,7 +61,7 @@ impl Style {
         1.0 - self.ease_in(1.0 - t)
     }
 
-    fn progress(self, direction: Direction, t: f32) -> f32 {
+    pub(crate) fn progress(self, direction: Direction, t: f32) -> f32 {
         match direction {
             Direction::In => self.ease_in(t),
             Direction::Out => self.ease_out(t),

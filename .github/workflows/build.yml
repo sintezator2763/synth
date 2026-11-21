@@ -130,7 +130,7 @@ jobs:
           tag_name: v${{ needs.version.outputs.number }}
           target_commitish: ${{ github.sha }}
           name: Synth v${{ needs.version.outputs.number }}
-          body: Автосборка.
+          body: Automated build.
           generate_release_notes: false
           fail_on_unmatched_files: true
           make_latest: legacy

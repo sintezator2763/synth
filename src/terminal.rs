@@ -18,6 +18,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Key, Modifiers, Rect, Sense, S
 
 use crate::{
     config::Terminal as Settings,
+    cursor_trail::{self, Cursor, Target, Trail},
     graphics::{self, Graphics, GraphicsPty, PendingTransfer, Position},
 };
 
@@ -109,6 +110,7 @@ pub struct Terminal {
     graphics: Graphics,
     size: WindowSize,
     font: FontId,
+    cursor_trail: Trail,
 }
 
 impl Terminal {
@@ -208,6 +210,7 @@ impl Terminal {
             graphics: Graphics::default(),
             size,
             font,
+            cursor_trail: Trail::default(),
         })
     }
 
@@ -244,6 +247,10 @@ impl Terminal {
         self.font.size = size;
     }
 
+    pub fn clear_cursor_trail(&mut self) {
+        self.cursor_trail = Trail::default();
+    }
+
     pub fn focus_id() -> egui::Id {
         egui::Id::new("terminal input")
     }
@@ -254,9 +261,10 @@ impl Terminal {
         rect: Rect,
         request_focus: bool,
         interactive: bool,
-        foreground: Color32,
-        background: Color32,
+        colors: (Color32, Color32),
+        trail: &cursor_trail::Settings,
     ) -> bool {
+        let (foreground, background) = colors;
         let cell = cell_size(ui, &self.font);
         let grid = grid_size(rect, cell);
         let size = window_size(grid, cell);
@@ -338,7 +346,7 @@ impl Terminal {
             response.surrender_focus();
         }
 
-        self.draw(ui, rect, cell, foreground, background, response.has_focus());
+        self.draw(ui, rect, cell, colors, response.has_focus(), trail);
         false
     }
 
@@ -474,14 +482,15 @@ impl Terminal {
     }
 
     fn draw(
-        &self,
+        &mut self,
         ui: &egui::Ui,
         rect: Rect,
         cell: Vec2,
-        foreground: Color32,
-        background: Color32,
+        colors: (Color32, Color32),
         focused: bool,
+        trail: &cursor_trail::Settings,
     ) {
+        let (foreground, background) = colors;
         let term = self.term.lock();
         let content = term.renderable_content();
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
@@ -587,6 +596,35 @@ impl Terminal {
             }
         }
         self.graphics.draw(&painter, rect, cell, origin, false);
+        let cursor = if trail.enabled_for(Target::Terminal)
+            && focused
+            && content.display_offset == 0
+            && content.cursor.shape != CursorShape::Hidden
+        {
+            let mut size = cell;
+            let mut pos = egui::pos2(
+                content.cursor.point.column.0 as f32 * cell.x,
+                content.cursor.point.line.0 as f32 * cell.y,
+            );
+            match content.cursor.shape {
+                CursorShape::Beam => size.x = 1.5,
+                CursorShape::Underline => {
+                    pos.y += cell.y - 2.0;
+                    size.y = 2.0;
+                }
+                _ => {}
+            }
+            Some(Cursor {
+                surface: egui::Id::new(("terminal cursor", origin.alternate)),
+                rect: Rect::from_min_size(pos, size),
+                origin: rect.min.to_vec2(),
+                cell,
+                color: content.colors[NamedColor::Cursor as usize].map_or(foreground, rgb_color),
+            })
+        } else {
+            None
+        };
+        self.cursor_trail.draw(&painter, trail, cursor);
     }
 }
 

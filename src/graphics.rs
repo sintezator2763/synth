@@ -475,19 +475,19 @@ impl Graphics {
         cell: Vec2,
         room: Vec2,
     ) -> Result<usize, String> {
-        let info =
-            std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let info = std::fs::metadata(path)
+            .map_err(|error| format!("{}: {}", path.display(), crate::io_message(&error)))?;
         if !info.is_file() {
             return Err("Expected a regular image file".into());
         }
         if info.len() > MAX_IMAGE_BYTES as u64 {
             return Err("Image file exceeds the size limit".into());
         }
-        let file =
-            std::fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let file = std::fs::File::open(path)
+            .map_err(|error| format!("{}: {}", path.display(), crate::io_message(&error)))?;
         let reader = image::ImageReader::new(BufReader::new(file))
             .with_guessed_format()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| crate::io_message(&error))?;
         let content = decode_image(reader)?;
         let [width, height] = content.size;
         let available = room * cell;

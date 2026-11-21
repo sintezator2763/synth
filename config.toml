@@ -1,5 +1,7 @@
+# Save this file to apply changes. The shell and its arguments apply to the next terminal session.
+
 [editor]
-theme = "dark"
+theme = "dark" # dark, light
 font_size = 16.0
 
 [interface]
@@ -9,22 +11,36 @@ enable_syntax_highlighting = false
 enable_status_bar = false
 
 [terminal]
-side = "right"
-width_fraction = 0.44
+side = "right" # right, left
+width_fraction = 0.44 # fraction of the window, from 0.15 to 0.85
 font_size = 14.0
-args = []
+# shell = "pwsh" # omit for the platform default
+args = [] # arguments for a custom shell
+# toggle_key = "Esc" # legacy shortcut, used when [keybindings] is absent
+# animation_ms = 180 # legacy duration, used when [animations.terminal] is absent
 
 [keybindings]
 Esc = "synth terminal toggle"
+# "Ctrl+Alt+F" = "synth focus toggle"
+# "Ctrl+S" = "synth save"
+# "Ctrl+N" = "synth new"
+# "Ctrl+PageDown" = "synth tab next"
+# "Ctrl+PageUp" = "synth tab prev"
+# "Ctrl+Shift+R" = "synth config reload"
+
+# Panel animations. Cursor trails are controlled independently below.
+# direction: in, out, in_out, out_in
+# style: linear, sine, quadratic, cubic, quartic, quintic, exponential, circular, back, elastic, bounce
+# Older configs may use easing in place of direction.
 
 [animations]
-enabled = true
+enabled = false
 
 [animations.terminal]
 open_ms = 180
 close_ms = 140
 direction = "out"
-style = "quadratic"
+style = "cubic"
 
 [animations.tabs]
 duration_ms = 120
@@ -40,3 +56,15 @@ style = "quadratic"
 duration_ms = 100
 direction = "out"
 style = "linear"
+
+[cursor_trail]
+target = "none" # none, editor, terminal, both
+delay_ms = 65 # how long the cursor must stay still before a move can leave a trail
+decay_seconds = [0.10, 0.40] # fade times for short and long jumps
+start_threshold_cells = [2.0, 2.0] # minimum move in columns or rows
+color = "auto" # cursor color, or a hex color such as "#77BFFF"
+opacity = 0.62 # 0 to 1
+width_scale = 1.0
+appearance = "glow" # glow, ribbon, solid
+direction = "out"
+style = "cubic"
