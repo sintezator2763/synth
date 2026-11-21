@@ -12,6 +12,12 @@ use crate::{
     document::{Document, Documents},
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabAction {
+    Activate(usize),
+    New,
+}
+
 #[derive(Default)]
 pub struct Editor {
     syntax: Option<SyntaxLayouts>,
@@ -156,8 +162,8 @@ impl Editor {
     }
 }
 
-pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Option<usize> {
-    let height = 36.0
+pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Option<TabAction> {
+    let height = config.interface.tab_height
         * config.animations.tabs.progress(
             ctx,
             "tabs animation",
@@ -172,37 +178,75 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
         .exact_height(height)
         .show(ctx, |ui| {
             let mut area = ui.max_rect().shrink2(egui::vec2(10.0, 0.0));
-            area.max.y = area.min.y + 36.0;
+            area.max.y = area.min.y + config.interface.tab_height;
             let mut bar = ui.new_child(
                 UiBuilder::new()
                     .max_rect(area)
                     .layout(Layout::left_to_right(Align::Center)),
             );
-            let mut selected = None;
+            let mut action = None;
             ScrollArea::horizontal()
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(&mut bar, |ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
                     for (index, document) in documents.items.iter().enumerate() {
-                        let name = document.name();
-                        let label = if document.dirty() {
-                            format!("● {name}")
+                        let active = index == documents.active;
+                        let fill = if active {
+                            ui.visuals().selection.bg_fill.gamma_multiply(0.65)
                         } else {
-                            name
+                            ui.visuals().faint_bg_color
                         };
-                        if ui
-                            .selectable_label(
-                                index == documents.active,
-                                RichText::new(label).monospace(),
-                            )
-                            .clicked()
-                        {
-                            selected = Some(index);
-                        }
+                        let stroke = if active {
+                            ui.visuals().widgets.active.bg_stroke
+                        } else {
+                            egui::Stroke::NONE
+                        };
+                        egui::Frame::NONE
+                            .fill(fill)
+                            .stroke(stroke)
+                            .corner_radius(egui::CornerRadius::same(6))
+                            .inner_margin(egui::Margin::symmetric(8, 4))
+                            .show(ui, |ui| {
+                                let name = document.name();
+                                let title = truncate_tab_name(&name, config.interface.tab_max_chars);
+                                let title = if document.dirty() {
+                                    format!("{title} *")
+                                } else {
+                                    title
+                                };
+                                let tooltip = document.path.as_ref().map_or_else(
+                                    || name.clone(),
+                                    |path| path.display().to_string(),
+                                );
+                                if ui
+                                    .add(egui::Button::new(RichText::new(title).monospace())
+                                        .frame(false))
+                                    .on_hover_text(tooltip)
+                                    .clicked()
+                                {
+                                    action = Some(TabAction::Activate(index));
+                                }
+                            });
+                    }
+                    if config.interface.tab_new_button
+                        && ui.small_button("+").on_hover_text("New tab").clicked()
+                    {
+                        action = Some(TabAction::New);
                     }
                 });
-            selected
+            action
         })
         .inner
+}
+
+fn truncate_tab_name(name: &str, max_chars: usize) -> String {
+    let mut chars = name.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
 }
 
 pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
@@ -229,14 +273,15 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
             );
             let name = document.name();
             let label = if document.dirty() {
-                format!("● {name}")
+                format!("{name} *")
             } else {
                 name
             };
             let (line, column) = document.position();
+            let lines = document.text.bytes().filter(|byte| *byte == b'\n').count() + 1;
             bar.label(RichText::new(label).monospace());
             bar.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(format!("UTF-8   {line}:{column}")).monospace());
+                ui.label(RichText::new(format!("UTF-8  |  {lines} lines  |  {line}:{column}")).monospace());
             });
         });
 }
@@ -322,5 +367,17 @@ impl SyntaxLayouts {
         }
         self.cached = Some((style, job.clone()));
         job
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_tab_name;
+
+    #[test]
+    fn truncation_respects_unicode_characters() {
+        assert_eq!(truncate_tab_name("document.txt", 8), "document...");
+        assert_eq!(truncate_tab_name("猫猫猫", 2), "猫猫...");
+        assert_eq!(truncate_tab_name("short", 8), "short");
     }
 }

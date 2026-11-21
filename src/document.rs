@@ -218,14 +218,22 @@ impl Documents {
                 return Err(format!("{} is not a regular file", path.display()));
             }
             let (text, bom) = read_file(&path)?;
-            if self.current().id != 0 || self.current().path.is_some() || self.current().dirty() {
-                self.create();
-            }
-            let document = self.current_mut();
+            let mut document = Document::empty(self.next_id);
+            self.next_id += 1;
             document.text = text;
             document.saved.clone_from(&document.text);
             document.bom = bom;
             document.path = Some(path.clone());
+            if self.current().id == 0
+                && self.current().path.is_none()
+                && !self.current().dirty()
+                && self.current().text.is_empty()
+            {
+                self.items[self.active] = document;
+            } else {
+                self.items.push(document);
+                self.active = self.items.len() - 1;
+            }
         }
         Ok(format!("Opened {}", path.display()))
     }
@@ -320,4 +328,42 @@ mod tests {
         assert_eq!(document.selection, Some(3..4));
         assert_eq!(document.find(None).unwrap(), "Match at 1:2");
     }
+
+    #[test]
+    fn opening_file_uses_fresh_editor_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("example.txt");
+        fs::write(&path, "Keep this content").unwrap();
+        let mut documents = Documents::default();
+        let initial_id = documents.current().id;
+        documents.open(&path).unwrap();
+        assert_ne!(documents.current().id, initial_id);
+        assert_eq!(documents.current().text, "Keep this content");
+        assert!(!documents.current().dirty());
+        assert_eq!(documents.items.len(), 1);
+
+        let opened_id = documents.current().id;
+        documents.open(&path).unwrap();
+        assert_eq!(documents.current().id, opened_id);
+        documents.close(false).unwrap();
+        documents.open(&path).unwrap();
+        assert_ne!(documents.current().id, opened_id);
+        assert_eq!(documents.current().text, "Keep this content");
+    }
+
+    #[test]
+    fn opening_file_preserves_existing_empty_untitled_tab() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("document.txt");
+        fs::write(&path, "Hello").unwrap();
+        let mut documents = Documents::default();
+        documents.create();
+        let untitled_id = documents.current().id;
+        documents.open(&path).unwrap();
+        assert_eq!(documents.items.len(), 3);
+        assert_eq!(documents.items[1].id, untitled_id);
+        assert!(documents.items[1].path.is_none());
+        assert_eq!(documents.current().text, "Hello");
+    }
+
 }

@@ -19,7 +19,7 @@ use std::{
 use command::{Command, Reply, Request};
 use config::{Bindings, Config, ConfigWatch, Side};
 use document::Documents;
-use editor::Editor;
+use editor::{Editor, TabAction};
 use eframe::egui::{self, FontId};
 use terminal::Terminal;
 
@@ -322,8 +322,11 @@ impl eframe::App for Synth {
             self.notice = Some("Save or discard changed documents before closing Synth.".into());
         }
 
-        if let Some(active) = editor::tabs(ctx, &self.documents, &self.config) {
-            self.documents.active = active;
+        if let Some(action) = editor::tabs(ctx, &self.documents, &self.config) {
+            match action {
+                TabAction::Activate(index) => self.documents.active = index,
+                TabAction::New => self.documents.create(),
+            }
             self.pending_focus = Some(Focus::Editor);
         }
         editor::status(ctx, self.documents.current(), &self.config);
@@ -334,7 +337,7 @@ impl eframe::App for Synth {
         }
         self.terminal_panel(ctx);
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(18))
+            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(self.config.interface.editor_padding))
             .show(ctx, |ui| {
                 for error in [&self.config_error, &self.notice].into_iter().flatten() {
                     ui.colored_label(ui.visuals().error_fg_color, error);

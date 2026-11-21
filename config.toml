@@ -9,6 +9,10 @@ enable_tabs = false
 enable_line_numbers = false
 enable_syntax_highlighting = false
 enable_status_bar = false
+tab_height = 36.0
+tab_max_chars = 28
+tab_new_button = true
+editor_padding = 18
 
 [terminal]
 side = "right" # right, left

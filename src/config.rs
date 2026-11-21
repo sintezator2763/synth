@@ -144,13 +144,32 @@ fn parse_shortcut(text: &str) -> Result<egui::KeyboardShortcut, String> {
     Ok(egui::KeyboardShortcut::new(modifiers, key))
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Interface {
     pub enable_tabs: bool,
     pub enable_line_numbers: bool,
     pub enable_syntax_highlighting: bool,
     pub enable_status_bar: bool,
+    pub tab_height: f32,
+    pub tab_max_chars: usize,
+    pub tab_new_button: bool,
+    pub editor_padding: i8,
+}
+
+impl Default for Interface {
+    fn default() -> Self {
+        Self {
+            enable_tabs: false,
+            enable_line_numbers: false,
+            enable_syntax_highlighting: false,
+            enable_status_bar: false,
+            tab_height: 36.0,
+            tab_max_chars: 28,
+            tab_new_button: true,
+            editor_padding: 18,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -410,6 +429,15 @@ impl Config {
         if !(0.15..=0.85).contains(&config.terminal.width_fraction) {
             return Err("terminal.width_fraction must be between 0.15 and 0.85".into());
         }
+        if !(28.0..=64.0).contains(&config.interface.tab_height) {
+            return Err("interface.tab_height must be between 28 and 64".into());
+        }
+        if !(8..=128).contains(&config.interface.tab_max_chars) {
+            return Err("interface.tab_max_chars must be between 8 and 128".into());
+        }
+        if !(0..=64).contains(&config.interface.editor_padding) {
+            return Err("interface.editor_padding must be between 0 and 64".into());
+        }
         if config
             .terminal
             .shell
@@ -487,4 +515,19 @@ mod tests {
         assert!(Config::parse("[terminal]\nwidth_fraction = 1.0").is_err());
         assert!(Config::parse("[terminal]\ntoggle_key = 'Hyper+X'").is_err());
     }
+
+    #[test]
+    fn interface_layout_limits_are_validated() {
+        assert!(Config::parse("[interface]\ntab_height = 24.0").is_err());
+        assert!(Config::parse("[interface]\ntab_max_chars = 0").is_err());
+        assert!(Config::parse("[interface]\neditor_padding = 65").is_err());
+        let config = Config::parse(
+            "[interface]\ntab_height = 42.0\ntab_max_chars = 32\neditor_padding = 8",
+        )
+        .unwrap();
+        assert_eq!(config.interface.tab_height, 42.0);
+        assert_eq!(config.interface.tab_max_chars, 32);
+        assert_eq!(config.interface.editor_padding, 8);
+    }
+
 }
