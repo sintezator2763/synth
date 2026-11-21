@@ -84,6 +84,60 @@ jobs:
           if ($version.FileVersion -ne $env:SYNTH_VERSION -or $version.ProductVersion -ne $env:SYNTH_VERSION) {
             throw "Unexpected EXE version. File: $($version.FileVersion), product: $($version.ProductVersion)"
           }
+      - name: Verify maximized Windows startup
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class SynthWindow {
+              [StructLayout(LayoutKind.Sequential)]
+              public struct Rect { public int Left, Top, Right, Bottom; }
+              [DllImport("user32.dll")]
+              public static extern bool GetWindowRect(IntPtr window, out Rect bounds);
+              [DllImport("user32.dll")]
+              public static extern bool IsZoomed(IntPtr window);
+          }
+          '@
+          $directory = Join-Path $env:RUNNER_TEMP "synth-window-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Force $directory | Out-Null
+          $executable = Join-Path $directory synth.exe
+          Copy-Item "dist/Synth-${env:SYNTH_VERSION}-windows-x64-portable.exe" $executable
+          $process = Start-Process -FilePath $executable -PassThru
+          try {
+            $verified = $false
+            for ($i = 0; $i -lt 50; $i++) {
+              $process.Refresh()
+              if ($process.HasExited) {
+                throw "Synth exited during startup with code $($process.ExitCode)"
+              }
+              $handle = $process.MainWindowHandle
+              if ($handle -ne [IntPtr]::Zero -and [SynthWindow]::IsZoomed($handle)) {
+                $bounds = [SynthWindow+Rect]::new()
+                if ([SynthWindow]::GetWindowRect($handle, [ref]$bounds)) {
+                  $work = [System.Windows.Forms.Screen]::FromHandle($handle).WorkingArea
+                  $edges = @(
+                    ($bounds.Left - $work.Left), ($bounds.Right - $work.Right),
+                    ($bounds.Top - $work.Top), ($bounds.Bottom - $work.Bottom)
+                  )
+                  if (@($edges | Where-Object { [Math]::Abs($_) -gt 24 }).Count -eq 0) {
+                    $verified = $true
+                    break
+                  }
+                }
+              }
+              Start-Sleep -Milliseconds 200
+            }
+            if (-not $verified) {
+              throw "Synth did not maximize to the monitor work area"
+            }
+          } finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id
+            }
+          }
       - name: Build macOS DMG
         if: matrix.platform == 'macos'
         run: |

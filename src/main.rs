@@ -43,6 +43,8 @@ struct Synth {
     config_error: Option<String>,
     notice: Option<String>,
     pending_focus: Option<Focus>,
+    #[cfg(windows)]
+    maximize_on_startup: bool,
 }
 
 impl Synth {
@@ -79,6 +81,8 @@ impl Synth {
             config_error: None,
             notice: setup_error.or(watch_error),
             pending_focus: Some(Focus::Editor),
+            #[cfg(windows)]
+            maximize_on_startup: true,
         };
         app.bindings = app.config.bindings(&app.config_path).unwrap_or_default();
         ctx.set_visuals(app.config.editor.theme.visuals());
@@ -285,6 +289,10 @@ impl Synth {
 
 impl eframe::App for Synth {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if std::mem::take(&mut self.maximize_on_startup) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
         if let Some(watcher) = &mut self.watcher {
             match watcher.ready(ctx) {
                 Ok(true) => {
@@ -381,7 +389,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("synth")
             .with_icon(icon)
-            .with_maximized(cfg!(windows))
             .with_inner_size([1040.0, 680.0])
             .with_min_inner_size([480.0, 300.0]),
         ..Default::default()
