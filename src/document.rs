@@ -14,8 +14,11 @@ pub struct Document {
     pub cursor: usize,
     pub selection: Option<Range<usize>>,
     saved: String,
+    dirty: bool,
     bom: bool,
     search: Option<(String, usize)>,
+    line_starts: Vec<usize>,
+    char_count: usize,
 }
 
 impl Document {
@@ -27,13 +30,16 @@ impl Document {
             cursor: 0,
             selection: None,
             saved: String::new(),
+            dirty: false,
             bom: false,
             search: None,
+            line_starts: vec![0],
+            char_count: 0,
         }
     }
 
     pub fn dirty(&self) -> bool {
-        self.text != self.saved
+        self.dirty
     }
 
     pub fn name(&self) -> String {
@@ -43,29 +49,60 @@ impl Document {
         )
     }
 
-    fn display_path(&self) -> String {
+    pub fn display_path(&self) -> String {
         self.path
             .as_ref()
             .map_or_else(|| self.name(), |path| path.display().to_string())
     }
 
-    pub fn position(&self) -> (usize, usize) {
-        let mut line = 1;
-        let mut column = 1;
-        for character in self.text.chars().take(self.cursor) {
+    pub fn text_changed(&mut self) {
+        self.dirty = self.text != self.saved;
+        self.line_starts.clear();
+        self.line_starts.push(0);
+        self.char_count = 0;
+        for character in self.text.chars() {
+            self.char_count += 1;
             if character == '\n' {
-                line += 1;
-                column = 1;
-            } else {
-                column += 1;
+                self.line_starts.push(self.char_count);
             }
         }
-        (line, column)
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.line_starts.len()
+    }
+
+    pub fn position(&self) -> (usize, usize) {
+        self.position_at(self.cursor)
+    }
+
+    fn position_at(&self, cursor: usize) -> (usize, usize) {
+        let line = self.line_starts.partition_point(|&start| start <= cursor);
+        (line, cursor - self.line_starts[line - 1] + 1)
+    }
+
+    fn move_cursor(&mut self, position: usize) {
+        self.cursor = position;
+        self.selection = Some(position..position);
+    }
+
+    pub fn goto(&mut self, line: usize, column: usize) -> Reply {
+        let start = *self
+            .line_starts
+            .get(line.wrapping_sub(1))
+            .ok_or_else(|| format!("Line {line} is outside this document"))?;
+        let end = self
+            .line_starts
+            .get(line)
+            .map_or(self.char_count, |next| next - 1);
+        self.move_cursor(start + column.saturating_sub(1).min(end - start));
+        let (_, column) = self.position();
+        Ok(format!("Cursor at {line}:{column}"))
     }
 
     fn properties(&self) -> String {
         let (line, column) = self.position();
-        let lines = self.text.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let lines = self.line_count();
         let encoding = if self.bom { "UTF-8 with BOM" } else { "UTF-8" };
         let modified = if self.dirty() { "yes" } else { "no" };
         format!(
@@ -74,7 +111,7 @@ impl Document {
         )
     }
 
-    fn save(&mut self, destination: Option<&Path>) -> Reply {
+    pub fn save(&mut self, destination: Option<&Path>) -> Reply {
         let target = match destination {
             Some(destination) => {
                 let name = destination.file_name().ok_or("Expected a file path")?;
@@ -123,6 +160,7 @@ impl Document {
         .map_err(|error| file_error(&target, error.error))?;
 
         self.saved.clone_from(&self.text);
+        self.dirty = false;
         let message = format!("Saved {}", target.display());
         self.path = Some(target);
         Ok(message)
@@ -153,10 +191,7 @@ impl Document {
         self.cursor = start + query.chars().count();
         self.selection = Some(start..self.cursor);
         self.search = Some((query, self.cursor));
-        let cursor = self.cursor;
-        self.cursor = start;
-        let (line, column) = self.position();
-        self.cursor = cursor;
+        let (line, column) = self.position_at(start);
         Ok(format!("Match at {line}:{column}"))
     }
 }
@@ -222,6 +257,7 @@ impl Documents {
             self.next_id += 1;
             document.text = text;
             document.saved.clone_from(&document.text);
+            document.text_changed();
             document.bom = bom;
             document.path = Some(path.clone());
             if self.current().id == 0
@@ -236,6 +272,30 @@ impl Documents {
             }
         }
         Ok(format!("Opened {}", path.display()))
+    }
+
+    pub fn reload(&mut self, id: u64) -> Reply {
+        let document = self
+            .items
+            .iter_mut()
+            .find(|document| document.id == id)
+            .ok_or("Document is no longer open")?;
+        let path = document
+            .path
+            .as_ref()
+            .ok_or("This document has no file to reload")?;
+        let (text, bom) = read_file(path)?;
+        let reply = format!("Reloaded {}", path.display());
+        let cursor = document.cursor;
+        document.text = text;
+        document.saved.clone_from(&document.text);
+        document.text_changed();
+        document.bom = bom;
+        document.search = None;
+        document.move_cursor(cursor.min(document.char_count));
+        document.id = self.next_id;
+        self.next_id += 1;
+        Ok(reply)
     }
 
     pub fn save(&mut self, path: Option<&Path>) -> Reply {
@@ -299,6 +359,7 @@ mod tests {
         let mut documents = Documents::default();
         documents.open(&source).unwrap();
         documents.current_mut().text.push_str("hello");
+        documents.current_mut().text_changed();
         assert!(documents.close(false).is_err());
         documents.save(None).unwrap();
         assert_eq!(
@@ -322,11 +383,35 @@ mod tests {
         let mut documents = Documents::default();
         let document = documents.current_mut();
         document.text = "é猫\n猫".into();
+        document.text_changed();
         assert_eq!(document.find(Some("猫".into())).unwrap(), "Match at 1:2");
         assert_eq!(document.selection, Some(1..2));
         assert_eq!(document.find(None).unwrap(), "Match at 2:1");
         assert_eq!(document.selection, Some(3..4));
         assert_eq!(document.find(None).unwrap(), "Match at 1:2");
+    }
+
+    #[test]
+    fn goto_and_reload_preserve_character_positions_and_reset_editor_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("file.txt");
+        fs::write(&path, "éé\n猫猫").unwrap();
+        let mut documents = Documents::default();
+        documents.open(&path).unwrap();
+        let document = documents.current_mut();
+        let id = document.id;
+        assert_eq!(document.goto(2, 2).unwrap(), "Cursor at 2:2");
+        assert_eq!(document.selection, Some(4..4));
+        assert!(document.goto(3, 1).is_err());
+        fs::write(&path, "\u{feff}猫").unwrap();
+        documents.reload(id).unwrap();
+        let document = documents.current();
+        assert_ne!(document.id, id);
+        assert_eq!(document.text, "猫");
+        assert_eq!(document.selection, Some(1..1));
+        assert_eq!(document.position(), (1, 2));
+        assert!(document.bom);
+        assert!(!document.dirty());
     }
 
     #[test]

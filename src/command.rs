@@ -38,6 +38,8 @@ pub enum Command {
     New,
     Save,
     SaveAs(OsString),
+    Reload,
+    Goto { line: usize, column: usize },
     Close { discard: bool },
     Properties,
     Tabs,
@@ -64,6 +66,8 @@ pub fn help() -> String {
             ("open PATH", "Open a file or switch to it"),
             ("save", "Save the active document"),
             ("saveas PATH", "Save the active document to PATH"),
+            ("reload", "Reload the active document from disk"),
+            ("goto LINE[:COLUMN]", "Move the cursor to a line and column"),
             ("close", "Close an unchanged document"),
             ("close --discard", "Close without saving changes"),
             ("properties", "Show file information"),
@@ -103,7 +107,7 @@ pub fn help() -> String {
         output.push('\n');
     }
     output.push_str(
-        "Shortcuts are configured in config.toml.\nCommands other than help and config path/check require a running Synth window.\n",
+        "Shortcuts are configured in config.toml.\nUse 'synth PATH' or 'synth open PATH' to open a file, starting Synth if needed. Most other commands require a running window.\n",
     );
     output
 }
@@ -115,6 +119,16 @@ impl Command {
             (2.., "open", _) => path_argument(directory, &args[1..]).map(Self::Open),
             (1, "new", _) => Ok(Self::New),
             (1, "save", _) => Ok(Self::Save),
+            (1, "reload", _) => Ok(Self::Reload),
+            (2, "goto", location) => {
+                let (line, column) = location.split_once(':').unwrap_or((location, "1"));
+                let positive =
+                    |value: &str| value.parse::<usize>().ok().filter(|&number| number > 0);
+                match (positive(line), positive(column)) {
+                    (Some(line), Some(column)) => Ok(Self::Goto { line, column }),
+                    _ => Err("Expected goto LINE[:COLUMN] with positive numbers".into()),
+                }
+            }
             (2.., "saveas", _) => path_argument(directory, &args[1..]).map(Self::SaveAs),
             (1, "close", _) => Ok(Self::Close { discard: false }),
             (2, "close", "-d" | "--discard") => Ok(Self::Close { discard: true }),
@@ -135,6 +149,18 @@ impl Command {
             (2, "config", "reload") => Ok(Self::ConfigReload),
             _ => Err(USAGE.into()),
         }
+    }
+
+    pub fn parse_cli(args: &[OsString], directory: &Path) -> Result<Self, String> {
+        if let [path] = args
+            && !path.is_empty()
+            && !path.as_encoded_bytes().starts_with(b"-")
+            && directory.join(path).is_file()
+        {
+            return Self::parse(args, directory)
+                .or_else(|_| path_argument(directory, args).map(Self::Open));
+        }
+        Self::parse(args, directory)
     }
 }
 
@@ -211,15 +237,35 @@ fn listener_options(name: Name<'static>) -> io::Result<ListenerOptions<'static>>
 }
 
 pub fn dispatch(installation: &Path, command: &Command) -> Reply {
-    let mut stream =
-        Stream::connect(socket_name(installation).map_err(|error| crate::io_message(&error))?)
-            .map_err(|error| {
-                format!(
-                    "Could not connect to the running Synth: {}",
-                    crate::io_message(&error)
-                )
-            })?;
-    exchange(&mut stream, command).map_err(|error| crate::io_message(&error))?
+    dispatch_if_running(installation, command)?
+        .ok_or_else(|| "Could not connect to the running Synth: no command listener".to_owned())?
+}
+
+pub fn dispatch_if_running(
+    installation: &Path,
+    command: &Command,
+) -> Result<Option<Reply>, String> {
+    let name = socket_name(installation).map_err(|error| crate::io_message(&error))?;
+    let mut stream = match Stream::connect(name) {
+        Ok(stream) => stream,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(format!(
+                "Could not connect to the running Synth: {}",
+                crate::io_message(&error)
+            ));
+        }
+    };
+    exchange(&mut stream, command)
+        .map(Some)
+        .map_err(|error| crate::io_message(&error))
 }
 
 fn exchange(stream: &mut Stream, command: &Command) -> io::Result<Reply> {
@@ -414,9 +460,26 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("  "))
             .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 21);
+        assert_eq!(rows.len(), 23);
         for row in rows {
             assert_eq!(&row[24..26], "  ");
+        }
+    }
+
+    #[test]
+    fn goto_parses_one_based_positions() {
+        let parse =
+            |location: &str| Command::parse(&["goto".into(), location.into()], Path::new("."));
+        assert!(matches!(
+            parse("8"),
+            Ok(Command::Goto { line: 8, column: 1 })
+        ));
+        assert!(matches!(
+            parse("8:3"),
+            Ok(Command::Goto { line: 8, column: 3 })
+        ));
+        for invalid in ["0", "8:0", "8:", "8:3:2"] {
+            assert!(parse(invalid).is_err());
         }
     }
 

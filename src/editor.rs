@@ -1,9 +1,14 @@
+use std::collections::HashMap;
+
 use eframe::egui::{
     self, Align, Align2, Color32, FontId, Layout, RichText, ScrollArea, TextEdit, Ui, UiBuilder,
     text::{CCursor, CCursorRange, LayoutJob, TextFormat},
 };
 use syntect::{
-    easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet, util::LinesWithEndings,
+    easy::HighlightLines,
+    highlighting::{HighlightState, ThemeSet},
+    parsing::{ParseState, SyntaxSet},
+    util::LinesWithEndings,
 };
 
 use crate::{
@@ -21,6 +26,14 @@ pub struct Editor {
 impl Editor {
     pub fn id(document: &Document) -> egui::Id {
         egui::Id::new(("document", document.id))
+    }
+
+    pub fn retain_documents(&mut self, documents: &Documents) {
+        if let Some(syntax) = &mut self.syntax {
+            syntax
+                .cached
+                .retain(|id, _| documents.items.iter().any(|document| document.id == *id));
+        }
     }
 
     pub fn show(&mut self, ui: &mut Ui, document: &mut Document, config: &Config) {
@@ -47,13 +60,15 @@ impl Editor {
             .weak_text_color()
             .gamma_multiply(show_numbers.min(1.0));
         let foreground = ui.visuals().text_color();
+        let document_id = document.id;
+        let path = document.path.clone();
         let mut layout = |ui: &Ui, text: &str, wrap_width: f32| {
             let mut job = if config.interface.enable_syntax_highlighting {
                 self.syntax
                     .get_or_insert_with(SyntaxLayouts::new)
                     .highlight(
-                        document.id,
-                        document.path.as_deref(),
+                        document_id,
+                        path.as_deref(),
                         text,
                         &font,
                         config.editor.theme,
@@ -86,6 +101,9 @@ impl Editor {
                 .layouter(&mut layout)
                 .show(&mut editor);
             ui.advance_cursor_after_rect(editor.min_rect().union(area));
+            if output.response.changed() {
+                document.text_changed();
+            }
             if let Some(range) = output.cursor_range {
                 document.cursor = range.primary.ccursor.index;
             }
@@ -171,7 +189,7 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
     egui::TopBottomPanel::top("tabs")
         .resizable(false)
         .show_separator_line(false)
-        .frame(egui::Frame::NONE.fill(palette.editor_background))
+        .frame(egui::Frame::NONE.fill(palette.tabs_background))
         .exact_height(height)
         .show(ctx, |ui| {
             let mut area = ui.max_rect().shrink2(egui::vec2(10.0, 0.0));
@@ -284,7 +302,7 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
                 name
             };
             let (line, column) = document.position();
-            let lines = document.text.bytes().filter(|byte| *byte == b'\n').count() + 1;
+            let lines = document.line_count();
             bar.label(RichText::new(label).monospace());
             bar.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(RichText::new(format!("UTF-8  |  {lines} lines  |  {line}:{column}")).monospace());
@@ -295,23 +313,37 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
 struct SyntaxLayouts {
     syntaxes: SyntaxSet,
     themes: ThemeSet,
-    cached: Option<(SyntaxStyle, LayoutJob)>,
+    cached: HashMap<u64, HighlightedDocument>,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct SyntaxStyle {
-    id: u64,
-    extension: Option<String>,
+    syntax: usize,
     theme: Theme,
     font: FontId,
 }
+
+struct HighlightedDocument {
+    style: SyntaxStyle,
+    job: LayoutJob,
+    checkpoints: Vec<HighlightCheckpoint>,
+}
+
+struct HighlightCheckpoint {
+    byte: usize,
+    sections: usize,
+    highlight: HighlightState,
+    parse: ParseState,
+}
+
+const HIGHLIGHT_CHECKPOINT_LINES: usize = 64;
 
 impl SyntaxLayouts {
     fn new() -> Self {
         Self {
             syntaxes: SyntaxSet::load_defaults_newlines(),
             themes: ThemeSet::load_defaults(),
-            cached: None,
+            cached: HashMap::new(),
         }
     }
 
@@ -328,20 +360,7 @@ impl SyntaxLayouts {
             .and_then(std::path::Path::extension)
             .and_then(std::ffi::OsStr::to_str)
             .map(str::to_owned);
-        let style = SyntaxStyle {
-            id,
-            extension,
-            theme,
-            font: font.clone(),
-        };
-        if let Some((previous, job)) = &self.cached
-            && previous == &style
-            && job.text == text
-        {
-            return job.clone();
-        }
-        let syntax = style
-            .extension
+        let syntax = extension
             .as_deref()
             .and_then(|extension| self.syntaxes.find_syntax_by_extension(extension))
             .or_else(|| {
@@ -350,35 +369,129 @@ impl SyntaxLayouts {
                     .and_then(|first| self.syntaxes.find_syntax_by_first_line(first))
             });
         let Some(syntax) = syntax else {
+            self.cached.remove(&id);
             return LayoutJob::simple(text.to_owned(), font.clone(), foreground, f32::INFINITY);
         };
+        let style = SyntaxStyle {
+            syntax: self
+                .syntaxes
+                .syntaxes()
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, syntax))
+                .expect("syntax in this set"),
+            theme,
+            font: font.clone(),
+        };
+        let cached = self
+            .cached
+            .entry(id)
+            .or_insert_with(|| HighlightedDocument {
+                style: style.clone(),
+                job: LayoutJob::default(),
+                checkpoints: Vec::new(),
+            });
+        if cached.style == style && cached.job.text == text {
+            return cached.job.clone();
+        }
+        if cached.style != style {
+            cached.style = style;
+            cached.job = LayoutJob::default();
+            cached.checkpoints.clear();
+        }
         let theme = match theme {
             Theme::Dark => "base16-ocean.dark",
             Theme::Light => "InspiredGitHub",
         };
-        let mut highlighter = HighlightLines::new(syntax, &self.themes.themes[theme]);
-        let mut job = LayoutJob::default();
-        for line in LinesWithEndings::from(text) {
+        let theme = &self.themes.themes[theme];
+        let prefix = cached
+            .job
+            .text
+            .bytes()
+            .zip(text.bytes())
+            .take_while(|(previous, current)| previous == current)
+            .count();
+        cached.checkpoints.truncate(
+            cached
+                .checkpoints
+                .partition_point(|checkpoint| checkpoint.byte <= prefix),
+        );
+        let (offset, mut highlighter) = if let Some(checkpoint) = cached.checkpoints.last() {
+            cached.job.text.truncate(checkpoint.byte);
+            cached.job.sections.truncate(checkpoint.sections);
+            (
+                checkpoint.byte,
+                HighlightLines::from_state(
+                    theme,
+                    checkpoint.highlight.clone(),
+                    checkpoint.parse.clone(),
+                ),
+            )
+        } else {
+            cached.job = LayoutJob::default();
+            (0, HighlightLines::new(syntax, theme))
+        };
+        for (index, line) in LinesWithEndings::from(&text[offset..]).enumerate() {
+            if index > 0 && index % HIGHLIGHT_CHECKPOINT_LINES == 0 {
+                let (highlight, parse) = highlighter.state();
+                highlighter = HighlightLines::from_state(theme, highlight.clone(), parse.clone());
+                cached.checkpoints.push(HighlightCheckpoint {
+                    byte: cached.job.text.len(),
+                    sections: cached.job.sections.len(),
+                    highlight,
+                    parse,
+                });
+            }
             let Ok(segments) = highlighter.highlight_line(line, &self.syntaxes) else {
+                self.cached.remove(&id);
                 return LayoutJob::simple(text.to_owned(), font.clone(), foreground, f32::INFINITY);
             };
             for (style, segment) in segments {
                 let color = style.foreground;
-                job.append(
+                cached.job.append(
                     segment,
                     0.0,
                     TextFormat::simple(font.clone(), Color32::from_rgb(color.r, color.g, color.b)),
                 );
             }
         }
-        self.cached = Some((style, job.clone()));
-        job
+        cached.job.clone()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_tab_name;
+    use super::*;
+
+    #[test]
+    fn incremental_highlighting_matches_a_full_pass_after_multiline_edits() {
+        let mut layouts = SyntaxLayouts::new();
+        let path = Some(std::path::Path::new("file.rs"));
+        let font = FontId::monospace(16.0);
+        let mut text = "let value = 1;\n".repeat(90);
+        text.push_str("/* begin\n");
+        text.push_str(&"inside\n".repeat(80));
+        text.push_str("*/\nlet tail = 2;\n");
+        layouts.highlight(1, path, &text, &font, Theme::Dark, Color32::WHITE);
+        layouts.highlight(2, path, "fn main() {}", &font, Theme::Dark, Color32::WHITE);
+        assert!(layouts.cached.contains_key(&1));
+        for edited in [
+            text.replace("inside\n*/", "changed\n*/"),
+            text.replace("/* begin", "// begin"),
+            text[..text.find("/* begin").unwrap()].to_owned(),
+        ] {
+            let incremental =
+                layouts.highlight(1, path, &edited, &font, Theme::Dark, Color32::WHITE);
+            let full = SyntaxLayouts::new().highlight(
+                1,
+                path,
+                &edited,
+                &font,
+                Theme::Dark,
+                Color32::WHITE,
+            );
+            assert_eq!(incremental, full);
+        }
+    }
 
     #[test]
     fn truncation_respects_unicode_characters() {
