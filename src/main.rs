@@ -40,7 +40,7 @@ struct Synth {
     config_path: PathBuf,
     bindings: Bindings,
     watcher: Option<ConfigWatch>,
-    commands: Option<mpsc::Receiver<Request>>,
+    commands: mpsc::Receiver<Request>,
     documents: Documents,
     editor: Editor,
     terminal: Option<Terminal>,
@@ -70,17 +70,13 @@ impl Synth {
             Ok(watcher) => (Some(watcher), None),
             Err(error) => (None, Some(format!("Config watcher: {error}"))),
         };
-        let commands = command::listen(&installation, ctx.clone()).map_err(|error| {
-            let message = io_message(&error);
-            eprintln!("Synth command listener: {message}");
-            format!("Synth command listener: {message}")
-        });
+        let commands = command::listen(&installation, ctx);
         let mut app = Self {
             config: Config::default(),
             config_path,
             bindings: Vec::new(),
             watcher,
-            commands: commands.ok(),
+            commands,
             documents: Documents::default(),
             editor: Editor::default(),
             terminal: None,
@@ -456,11 +452,7 @@ impl eframe::App for Synth {
                 Err(error) => self.config_error = Some(error),
             }
         }
-        while let Some(request) = self
-            .commands
-            .as_ref()
-            .and_then(|queue| queue.try_recv().ok())
-        {
+        while let Ok(request) = self.commands.try_recv() {
             let reply = self.execute(ctx, request.command);
             let _ = request.respond.send(reply);
         }

@@ -51,7 +51,7 @@ impl Editor {
         let show_numbers = config.animations.line_numbers.progress(
             ui.ctx(),
             "line numbers animation",
-            config.interface.enable_line_numbers,
+            config.interface.show_line_numbers,
             config.animations.enabled,
         );
         let gutter = if show_numbers > 0.0 {
@@ -69,7 +69,7 @@ impl Editor {
         let document_id = document.id;
         let path = document.path.clone();
         let mut layout = |ui: &Ui, text: &str, wrap_width: f32| {
-            let mut job = if config.interface.enable_syntax_highlighting {
+            let mut job = if config.interface.syntax_highlighting {
                 self.syntax
                     .get_or_insert_with(SyntaxLayouts::new)
                     .highlight(
@@ -185,7 +185,7 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
         * config.animations.tabs.progress(
             ctx,
             "tabs animation",
-            config.interface.enable_tabs,
+            config.interface.show_tabs,
             config.animations.enabled,
         );
     if height <= 0.0 {
@@ -288,7 +288,7 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
         * config.animations.status_bar.progress(
             ctx,
             "status animation",
-            config.interface.enable_status_bar,
+            config.interface.show_status_bar,
             config.animations.enabled,
         );
     if height <= 0.0 {

@@ -228,11 +228,20 @@ pub enum Side {
     Right,
 }
 
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandTarget {
+    #[default]
+    Window,
+    Shared,
+}
+
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Terminal {
     pub side: Side,
     pub width_fraction: f32,
+    pub command_target: CommandTarget,
     animation_ms: Option<u16>,
     pub font_size: f32,
     pub toggle_key: Option<String>,
@@ -245,6 +254,7 @@ impl Default for Terminal {
         Self {
             side: Side::Right,
             width_fraction: 0.44,
+            command_target: CommandTarget::default(),
             animation_ms: None,
             font_size: 14.0,
             toggle_key: None,
@@ -286,10 +296,14 @@ fn parse_shortcut(text: &str) -> Result<egui::KeyboardShortcut, String> {
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Interface {
-    pub enable_tabs: bool,
-    pub enable_line_numbers: bool,
-    pub enable_syntax_highlighting: bool,
-    pub enable_status_bar: bool,
+    #[serde(alias = "enable_tabs")]
+    pub show_tabs: bool,
+    #[serde(alias = "enable_line_numbers")]
+    pub show_line_numbers: bool,
+    #[serde(alias = "enable_syntax_highlighting")]
+    pub syntax_highlighting: bool,
+    #[serde(alias = "enable_status_bar")]
+    pub show_status_bar: bool,
     pub tab_height: f32,
     pub tab_max_chars: usize,
     pub tab_font_size: f32,
@@ -302,10 +316,10 @@ pub struct Interface {
 impl Default for Interface {
     fn default() -> Self {
         Self {
-            enable_tabs: false,
-            enable_line_numbers: false,
-            enable_syntax_highlighting: false,
-            enable_status_bar: false,
+            show_tabs: false,
+            show_line_numbers: false,
+            syntax_highlighting: false,
+            show_status_bar: false,
             tab_height: 36.0,
             tab_max_chars: 28,
             tab_font_size: 12.0,
@@ -614,15 +628,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_interface_visibility_keys_are_still_accepted() {
+        let config = Config::parse(
+            "[interface]\nenable_tabs = true\nenable_line_numbers = true\nenable_syntax_highlighting = true\nenable_status_bar = true",
+        ).unwrap();
+        assert!(config.interface.show_tabs);
+        assert!(config.interface.show_line_numbers);
+        assert!(config.interface.syntax_highlighting);
+        assert!(config.interface.show_status_bar);
+    }
+
+    #[test]
     fn example_uses_default_shortcut_and_panel() {
         let config = Config::parse(include_str!("../config.toml")).unwrap();
         assert!(matches!(config.terminal.side, Side::Right));
+        assert!(matches!(config.terminal.command_target, CommandTarget::Window));
         assert!(!config.animations.enabled);
         assert_eq!(config.cursor_trail.target, cursor_trail::Target::None);
-        assert!(!config.interface.enable_tabs);
-        assert!(!config.interface.enable_line_numbers);
-        assert!(!config.interface.enable_syntax_highlighting);
-        assert!(!config.interface.enable_status_bar);
+        assert!(!config.interface.show_tabs);
+        assert!(!config.interface.show_line_numbers);
+        assert!(!config.interface.syntax_highlighting);
+        assert!(!config.interface.show_status_bar);
         assert_eq!(
             config
                 .bindings(Path::new("/tmp/config.toml"))

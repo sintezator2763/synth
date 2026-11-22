@@ -124,6 +124,11 @@ impl Terminal {
         options.env.insert("TERM".into(), "xterm-256color".into());
         options.env.insert("COLORTERM".into(), "truecolor".into());
         options.env.insert("TERM_PROGRAM".into(), "Synth".into());
+        let target = match settings.command_target {
+            crate::config::CommandTarget::Window => std::process::id().to_string(),
+            crate::config::CommandTarget::Shared => String::new(),
+        };
+        options.env.insert(crate::command::WINDOW_ENV.into(), target);
         for name in [
             "WT_SESSION",
             "KITTY_WINDOW_ID",

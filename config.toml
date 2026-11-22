@@ -5,10 +5,10 @@ theme = "dark" # dark, light
 font_size = 16.0
 
 [interface]
-enable_tabs = false
-enable_line_numbers = false
-enable_syntax_highlighting = false
-enable_status_bar = false
+show_tabs = false
+show_line_numbers = false
+syntax_highlighting = false
+show_status_bar = false
 tab_height = 36.0
 tab_max_chars = 28
 tab_font_size = 12.0
@@ -42,6 +42,7 @@ status_bar_bg = "#EAEFF6"
 [terminal]
 side = "right" # right, left
 width_fraction = 0.44 # fraction of the window, from 0.15 to 0.85
+command_target = "window" # window or shared, applies to the next terminal session
 font_size = 14.0
 # shell = "pwsh" # omit for the platform default
 args = [] # arguments for a custom shell

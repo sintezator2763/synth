@@ -3,6 +3,7 @@ use std::{
     ffi::{OsStr, OsString},
     hash::{Hash, Hasher},
     io::{self, Read, Write},
+    num::NonZeroU32,
     path::Path,
     sync::mpsc,
     time::Duration,
@@ -14,14 +15,19 @@ use interprocess::local_socket::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-fn socket_name(installation: &Path) -> io::Result<Name<'static>> {
+pub const WINDOW_ENV: &str = "SYNTH_WINDOW_PID";
+
+fn socket_name(installation: &Path, window: Option<NonZeroU32>) -> io::Result<Name<'static>> {
     let mut hash = DefaultHasher::new();
     installation.hash(&mut hash);
     #[cfg(unix)]
     unsafe {
         libc::geteuid().hash(&mut hash);
     }
-    let name = format!("synth-{:016x}", hash.finish());
+    let name = match window {
+        Some(pid) => format!("synth-{:016x}-{pid}", hash.finish()),
+        None => format!("synth-{:016x}", hash.finish()),
+    };
     if GenericNamespaced::is_supported() {
         name.to_ns_name::<GenericNamespaced>()
     } else {
@@ -245,7 +251,15 @@ pub fn dispatch_if_running(
     installation: &Path,
     command: &Command,
 ) -> Result<Option<Reply>, String> {
-    let name = socket_name(installation).map_err(|error| crate::io_message(&error))?;
+    let window = match std::env::var(WINDOW_ENV) {
+        Ok(value) if value.is_empty() => None,
+        Ok(value) => Some(
+            value.parse::<NonZeroU32>().map_err(|_| "Invalid SYNTH_WINDOW_PID")?,
+        ),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err("Invalid SYNTH_WINDOW_PID".into()),
+    };
+    let name = socket_name(installation, window).map_err(|error| crate::io_message(&error))?;
     let mut stream = match Stream::connect(name) {
         Ok(stream) => stream,
         Err(error)
@@ -254,7 +268,10 @@ pub fn dispatch_if_running(
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
             ) =>
         {
-            return Ok(None);
+            return match window {
+                Some(pid) => Err(format!("Could not connect to Synth window {pid}")),
+                None => Ok(None),
+            };
         }
         Err(error) => {
             return Err(format!(
@@ -275,8 +292,25 @@ fn exchange(stream: &mut Stream, command: &Command) -> io::Result<Reply> {
     read_frame(stream, COMMAND_TIMEOUT + Duration::from_secs(1))
 }
 
-pub fn listen(installation: &Path, ctx: egui::Context) -> io::Result<mpsc::Receiver<Request>> {
-    let name = socket_name(installation)?;
+pub fn listen(installation: &Path, ctx: &egui::Context) -> mpsc::Receiver<Request> {
+    let (sender, receiver) = mpsc::channel();
+    for window in [NonZeroU32::new(std::process::id()), None] {
+        if let Err(error) = listen_at(installation, window, ctx.clone(), sender.clone())
+            && (window.is_some() || error.kind() != io::ErrorKind::AddrInUse)
+        {
+            eprintln!("Synth command listener: {}", crate::io_message(&error));
+        }
+    }
+    receiver
+}
+
+fn listen_at(
+    installation: &Path,
+    window: Option<NonZeroU32>,
+    ctx: egui::Context,
+    sender: mpsc::Sender<Request>,
+) -> io::Result<()> {
+    let name = socket_name(installation, window)?;
     let listener = match listener_options(name.clone())?.create_sync() {
         Err(error)
             if !GenericNamespaced::is_supported()
@@ -291,7 +325,6 @@ pub fn listen(installation: &Path, ctx: egui::Context) -> io::Result<mpsc::Recei
         }
         result => result?,
     };
-    let (sender, receiver) = mpsc::channel();
     std::thread::Builder::new()
         .name("synth-command".into())
         .spawn(move || {
@@ -299,7 +332,7 @@ pub fn listen(installation: &Path, ctx: egui::Context) -> io::Result<mpsc::Recei
                 let _ = handle_request(&mut stream, &sender, &ctx);
             }
         })?;
-    Ok(receiver)
+    Ok(())
 }
 
 fn handle_request(
@@ -514,7 +547,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let installation = directory.path().join("synth");
         let path = directory.path().join("caf\u{e9} file.txt").into_os_string();
-        let requests = listen(&installation, egui::Context::default()).unwrap();
+        let requests = listen(&installation, &egui::Context::default());
         let server = std::thread::spawn(move || {
             let request = requests.recv_timeout(Duration::from_secs(3)).unwrap();
             assert!(matches!(request.command, Command::Open(opened) if opened == path));
@@ -526,15 +559,18 @@ mod tests {
                 .send(Err("Expected error reply".into()))
                 .unwrap();
         });
+        let connect = |window| Stream::connect(socket_name(&installation, window).unwrap()).unwrap();
+        let mut window = connect(NonZeroU32::new(std::process::id()));
         assert_eq!(
-            dispatch(
-                &installation,
+            exchange(
+                &mut window,
                 &Command::Open(directory.path().join("caf\u{e9} file.txt").into_os_string())
-            ),
+            ).unwrap(),
             Ok("Opened".into())
         );
+        let mut shared = connect(None);
         assert_eq!(
-            dispatch(&installation, &Command::Close { discard: true }),
+            exchange(&mut shared, &Command::Close { discard: true }).unwrap(),
             Err("Expected error reply".into())
         );
         server.join().unwrap();
