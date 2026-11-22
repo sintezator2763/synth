@@ -59,6 +59,10 @@ impl Keybind {
 #[serde(default, deny_unknown_fields)]
 pub struct Editor {
     pub theme: Theme,
+    pub tab_size: usize,
+    pub insert_spaces: bool,
+    pub auto_indent: bool,
+    pub formatter: Option<String>,
     pub wrap_lines: bool,
     pub recover_unsaved_documents: bool,
     pub font_size: f32,
@@ -68,6 +72,10 @@ impl Default for Editor {
     fn default() -> Self {
         Self {
             theme: Theme::Dark,
+            tab_size: 4,
+            insert_spaces: false,
+            auto_indent: false,
+            formatter: None,
             wrap_lines: true,
             recover_unsaved_documents: true,
             font_size: 16.0,
@@ -392,6 +400,9 @@ pub struct Interface {
     pub syntax_highlighting: bool,
     #[serde(alias = "enable_status_bar")]
     pub show_status_bar: bool,
+    pub status_bar_height: f32,
+    pub status_bar_font_size: f32,
+    pub show_file_icons: bool,
     pub show_external_file_changes: bool,
     pub enable_search_and_replace: bool,
     pub tab_height: f32,
@@ -410,6 +421,9 @@ impl Default for Interface {
             show_line_numbers: false,
             syntax_highlighting: false,
             show_status_bar: false,
+            status_bar_height: 26.0,
+            status_bar_font_size: 12.0,
+            show_file_icons: false,
             show_external_file_changes: true,
             enable_search_and_replace: false,
             tab_height: 36.0,
@@ -763,6 +777,22 @@ impl Config {
         }
         if !(0.15..=0.85).contains(&config.terminal.width_fraction) {
             return Err("terminal.width_fraction must be between 0.15 and 0.85".into());
+        }
+        if !(1..=16).contains(&config.editor.tab_size) {
+            return Err("editor.tab_size must be between 1 and 16".into());
+        }
+        if !(16.0..=64.0).contains(&config.interface.status_bar_height)
+            || !(8.0..=24.0).contains(&config.interface.status_bar_font_size)
+        {
+            return Err("Status bar height must be 16–64 and font size 8–24".into());
+        }
+        if config
+            .editor
+            .formatter
+            .as_ref()
+            .is_some_and(|command| command.trim().is_empty())
+        {
+            return Err("editor.formatter must be a nonempty command".into());
         }
         if !(28.0..=64.0).contains(&config.interface.tab_height) {
             return Err("interface.tab_height must be between 28 and 64".into());

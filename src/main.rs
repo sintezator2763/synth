@@ -45,6 +45,80 @@ struct WatchedDocument {
     change: Option<DiskChange>,
 }
 
+enum PaneLayout {
+    Leaf(u64),
+    Split {
+        down: bool,
+        first: Box<Self>,
+        second: Box<Self>,
+    },
+}
+
+impl PaneLayout {
+    fn split(&mut self, active: u64, new: u64, down: bool) -> bool {
+        match self {
+            Self::Leaf(id) if *id == active => {
+                *self = Self::Split {
+                    down,
+                    first: Box::new(Self::Leaf(active)),
+                    second: Box::new(Self::Leaf(new)),
+                };
+                true
+            }
+            Self::Leaf(_) => false,
+            Self::Split { first, second, .. } => {
+                first.split(active, new, down) || second.split(active, new, down)
+            }
+        }
+    }
+
+    fn close(&mut self, active: u64) -> bool {
+        let Self::Split { first, second, .. } = self else {
+            return false;
+        };
+        if matches!(**first, Self::Leaf(id) if id == active) {
+            *self = std::mem::replace(second.as_mut(), Self::Leaf(active));
+            true
+        } else if matches!(**second, Self::Leaf(id) if id == active) {
+            *self = std::mem::replace(first.as_mut(), Self::Leaf(active));
+            true
+        } else {
+            first.close(active) || second.close(active)
+        }
+    }
+
+    fn leaves(&self, rect: egui::Rect, out: &mut Vec<(u64, egui::Rect)>) {
+        match self {
+            Self::Leaf(id) => out.push((*id, rect)),
+            Self::Split {
+                down,
+                first,
+                second,
+            } => {
+                let mut a = rect;
+                let mut b = rect;
+                if *down {
+                    a.max.y = rect.center().y - 3.0;
+                    b.min.y = rect.center().y + 3.0;
+                } else {
+                    a.max.x = rect.center().x - 3.0;
+                    b.min.x = rect.center().x + 3.0;
+                }
+                first.leaves(a, out);
+                second.leaves(b, out);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct PaneState {
+    document: u64,
+    cursors: HashMap<u64, (usize, Option<std::ops::Range<usize>>)>,
+}
+
+type FormatResult = (u64, u64, Result<String, String>);
+
 struct Synth {
     config: Config,
     config_path: PathBuf,
@@ -54,6 +128,11 @@ struct Synth {
     commands: mpsc::Receiver<Request>,
     shell_errors: (mpsc::Sender<String>, mpsc::Receiver<String>),
     documents: Documents,
+    layout: PaneLayout,
+    panes: HashMap<u64, PaneState>,
+    active_pane: u64,
+    next_pane: u64,
+    formatted: (mpsc::Sender<FormatResult>, mpsc::Receiver<FormatResult>),
     editor: Editor,
     search_bar: SearchBar,
     recovery: Option<Recovery>,
@@ -120,6 +199,11 @@ impl Synth {
             commands,
             shell_errors: mpsc::channel(),
             documents: Documents::default(),
+            layout: PaneLayout::Leaf(0),
+            panes: HashMap::from([(0, PaneState::default())]),
+            active_pane: 0,
+            next_pane: 1,
+            formatted: mpsc::channel(),
             editor: Editor::default(),
             search_bar: SearchBar::default(),
             recovery: None,
@@ -199,6 +283,164 @@ impl Synth {
         })
     }
 
+    fn remember_pane(&mut self) {
+        let doc = self.documents.current();
+        let pane = self.panes.get_mut(&self.active_pane).unwrap();
+        pane.document = doc.id;
+        pane.cursors.insert(
+            doc.id,
+            (
+                doc.cursor,
+                doc.selection.clone().or_else(|| doc.selected_range.clone()),
+            ),
+        );
+    }
+
+    fn focus_pane(&mut self, id: u64) {
+        if self.active_pane != id {
+            self.remember_pane();
+            self.active_pane = id;
+            let pane = &self.panes[&id];
+            if let Some(index) = self
+                .documents
+                .items
+                .iter()
+                .position(|doc| doc.id == pane.document)
+            {
+                self.documents.active = index;
+            }
+            let doc = self.documents.current_mut();
+            let (cursor, selection) = pane.cursors.get(&doc.id).cloned().unwrap_or_default();
+            doc.cursor = doc.clamp_cursor(cursor);
+            doc.selection = Some(selection.map_or(doc.cursor..doc.cursor, |range| {
+                doc.clamp_cursor(range.start)..doc.clamp_cursor(range.end)
+            }));
+            doc.selected_range = doc.selection.clone();
+        }
+        self.pending_focus = Some(Focus::Editor);
+    }
+
+    fn restore_tab_cursor(&mut self) {
+        let doc = self.documents.current_mut();
+        let pane = &self.panes[&self.active_pane];
+        if let Some((cursor, selection)) = pane.cursors.get(&doc.id) {
+            doc.cursor = doc.clamp_cursor(*cursor);
+            doc.selection = Some(selection.clone().map_or(doc.cursor..doc.cursor, |range| {
+                doc.clamp_cursor(range.start)..doc.clamp_cursor(range.end)
+            }));
+            doc.selected_range = doc.selection.clone();
+        }
+    }
+
+    fn pane_ids(&self) -> Vec<u64> {
+        let mut leaves = Vec::new();
+        self.layout.leaves(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::splat(256.0)),
+            &mut leaves,
+        );
+        leaves.into_iter().map(|(id, _)| id).collect()
+    }
+
+    fn show_panes(&mut self, ui: &mut egui::Ui) {
+        let mut leaves = Vec::new();
+        let area = ui.available_rect_before_wrap();
+        self.layout.leaves(area, &mut leaves);
+        let active = self.active_pane;
+        let fallback = self.documents.active;
+        let mut focus = None;
+        for (id, rect) in leaves {
+            if !rect.is_positive() {
+                continue;
+            }
+            let pane = self.panes.get_mut(&id).unwrap();
+            let index = if id == active {
+                fallback
+            } else {
+                self.documents
+                    .items
+                    .iter()
+                    .position(|doc| doc.id == pane.document)
+                    .unwrap_or(fallback)
+            };
+            let doc = &mut self.documents.items[index];
+            pane.document = doc.id;
+            let mut child = ui.new_child(egui::UiBuilder::new().id_salt(id).max_rect(rect));
+            child.set_clip_rect(rect.intersect(ui.clip_rect()));
+            if self.panes.len() > 1 {
+                child.painter().rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(
+                        1.0_f32,
+                        if id == active {
+                            self.config.palette().accent
+                        } else {
+                            ui.visuals().widgets.noninteractive.bg_stroke.color
+                        },
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            let pane = self.panes.get_mut(&id).unwrap();
+            let inactive = id != active;
+            let (saved_cursor, saved_selection, saved_range) = if inactive {
+                let (cursor, _) = pane.cursors.get(&doc.id).cloned().unwrap_or_default();
+                (
+                    std::mem::replace(&mut doc.cursor, cursor),
+                    doc.selection.take(),
+                    doc.selected_range.take(),
+                )
+            } else {
+                (0, None, None)
+            };
+            let highlight = (!inactive).then(|| self.search_bar.highlight()).flatten();
+            let focused = self
+                .editor
+                .show(&mut child, doc, &self.config, id, highlight);
+            if inactive {
+                pane.cursors
+                    .insert(doc.id, (doc.cursor, doc.selected_range.clone()));
+                doc.cursor = saved_cursor;
+                doc.selection = saved_selection;
+                doc.selected_range = saved_range;
+                if focused {
+                    focus = Some(id);
+                }
+            }
+        }
+        if let Some(id) = focus {
+            self.focus_pane(id);
+        }
+        ui.advance_cursor_after_rect(area);
+    }
+
+    fn format_document(&self, ctx: &egui::Context) -> Reply {
+        let script = self
+            .config
+            .editor
+            .formatter
+            .clone()
+            .ok_or("Set editor.formatter in config.toml first")?;
+        let doc = self.documents.current();
+        let (id, revision, text) = (doc.id, doc.revision, doc.text.clone());
+        let directory = doc
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_owned);
+        let sender = self.formatted.0.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("synth-format".into())
+            .spawn(move || {
+                let output = format_text(&script, directory.as_deref(), text);
+                let _ = sender.send((id, revision, output));
+                ctx.request_repaint();
+            })
+            .map_err(|error| io_message(&error))?;
+        Ok("Formatting document".into())
+    }
+
     fn execute(&mut self, ctx: &egui::Context, command: Command) -> Reply {
         if matches!(command, Command::CancelDialog) {
             if self.confirmation.take().is_none() {
@@ -212,10 +454,26 @@ impl Synth {
             return Err("Finish the confirmation in the Synth window first".into());
         }
         self.notice = None;
+        self.remember_pane();
+        let previous_pane = self.active_pane;
         let previous = self.documents.current().id;
         let focus = self.focus(ctx);
+        if matches!(
+            command,
+            Command::DuplicateLine
+                | Command::MoveLine(_)
+                | Command::Indent(_)
+                | Command::LineEnding(_)
+        ) {
+            self.editor
+                .add_undo(ctx, self.documents.current(), self.active_pane);
+            self.pending_focus = Some(Focus::Editor);
+        }
         let reply = match command {
             Command::Open(path) => self.documents.open(Path::new(&path)),
+            Command::OpenEncoded(encoding, path) => self
+                .documents
+                .open_encoded(Path::new(&path), Some(encoding)),
             Command::New => {
                 self.documents.create();
                 Ok("Created a new document".into())
@@ -335,10 +593,70 @@ impl Synth {
             Command::ConfigPath => Ok(self.config_path.display().to_string()),
             Command::ConfigCheck => check_config(&self.config_path),
             Command::ConfigReload => self.reload_config(ctx),
+            Command::SaveAll => self.documents.save_all(),
+            Command::SelectTab(number) => self.documents.select(number),
+            Command::Reopen => self.documents.reopen(),
+            Command::Encoding(encoding) => self.documents.current_mut().set_encoding(encoding),
+            Command::LineEnding(ending) => self.documents.current_mut().set_ending(ending),
+            Command::DuplicateLine => self.documents.current_mut().duplicate_line(),
+            Command::MoveLine(down) => self.documents.current_mut().move_line(down),
+            Command::Indent(increase) => self.documents.current_mut().indent(
+                increase,
+                self.config.editor.insert_spaces,
+                self.config.editor.tab_size,
+            ),
+            Command::ConfigEdit => self.documents.open(&self.config_path),
+            Command::RestartTerminal => {
+                self.terminal = None;
+                self.terminal_error = None;
+                self.terminal_open = true;
+                self.pending_focus = Some(Focus::Terminal);
+                Ok("Restarting terminal".into())
+            }
+            Command::Format => self.format_document(ctx),
+            Command::Split(down) => {
+                if self.panes.len() >= 16 {
+                    return Err("At most 16 editor panes are supported".into());
+                }
+                let id = self.next_pane;
+                self.next_pane += 1;
+                self.layout.split(self.active_pane, id, down);
+                self.panes.insert(
+                    id,
+                    PaneState {
+                        document: previous,
+                        cursors: self.panes[&self.active_pane].cursors.clone(),
+                    },
+                );
+                self.focus_pane(id);
+                Ok("Split editor".into())
+            }
+            Command::SplitClose => {
+                let active = self.active_pane;
+                let ids = self.pane_ids();
+                if !self.layout.close(active) {
+                    return Err("The editor has only one pane".into());
+                }
+                let index = ids.iter().position(|&id| id == active).unwrap();
+                self.focus_pane(ids[(index + 1) % ids.len()]);
+                self.panes.remove(&active);
+                self.editor.forget_pane(ctx, active);
+                Ok("Closed editor pane".into())
+            }
+            Command::SplitNext => {
+                let ids = self.pane_ids();
+                let index = ids.iter().position(|&id| id == self.active_pane).unwrap();
+                self.focus_pane(ids[(index + 1) % ids.len()]);
+                Ok("Focused next editor pane".into())
+            }
         };
-        if self.documents.current().id != previous && focus == Focus::Editor {
-            self.pending_focus = Some(Focus::Editor);
+        if self.documents.current().id != previous && previous_pane == self.active_pane {
+            self.restore_tab_cursor();
+            if focus == Focus::Editor {
+                self.pending_focus = Some(Focus::Editor);
+            }
         }
+        self.remember_pane();
         reply
     }
 
@@ -393,8 +711,22 @@ impl Synth {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             return Ok("Confirm reload in the Synth window.".into());
         }
-        let reply = self.documents.reload(id)?;
+        let reply = self.reload_in_panes(id)?;
         self.pending_focus = Some(Focus::Editor);
+        Ok(reply)
+    }
+
+    fn reload_in_panes(&mut self, id: u64) -> Reply {
+        let reply = self.documents.reload(id)?;
+        let new = self.documents.current().id;
+        for pane in self.panes.values_mut() {
+            if pane.document == id {
+                pane.document = new;
+            }
+            if let Some(cursor) = pane.cursors.remove(&id) {
+                pane.cursors.insert(new, cursor);
+            }
+        }
         Ok(reply)
     }
 
@@ -474,7 +806,7 @@ impl Synth {
                     .map_err(|error| io_message(&error))
                     .and_then(|destination| self.documents.save(Some(&destination)))
                     .map(|_| ()),
-                Confirmation::Reload(id) => self.documents.reload(*id).map(|_| ()),
+                Confirmation::Reload(id) => self.reload_in_panes(*id).map(|_| ()),
                 Confirmation::Close(paths) => self.save_changed(paths),
             };
             match result {
@@ -715,6 +1047,29 @@ impl eframe::App for Synth {
                 Err(error) => self.config_error = Some(format!("Config watcher: {error}")),
             }
         }
+        while let Ok((id, revision, result)) = self.formatted.1.try_recv() {
+            let Some(doc) = self
+                .documents
+                .items
+                .iter_mut()
+                .find(|doc| doc.id == id && doc.revision == revision)
+            else {
+                self.notice =
+                    Some("Formatter result discarded because the document changed".into());
+                continue;
+            };
+            match result {
+                Ok(text) => {
+                    if text != doc.text {
+                        self.editor.add_undo(ctx, doc, self.active_pane);
+                        let cursor = doc.position();
+                        let _ = doc.replace_formatted(text, cursor);
+                    }
+                    self.notice = None;
+                }
+                Err(error) => self.notice = Some(error),
+            }
+        }
         while let Ok(request) = self.commands.try_recv() {
             let reply = self.execute(ctx, request.command);
             let _ = request.respond.send(reply);
@@ -734,13 +1089,15 @@ impl eframe::App for Synth {
         if let Some(index) = editor::tabs(ctx, &self.documents, &self.config)
             && self.confirmation.is_none()
         {
+            self.remember_pane();
             self.documents.active = index;
+            self.restore_tab_cursor();
             self.pending_focus = Some(Focus::Editor);
         }
         self.check_document_on_disk(ctx);
         editor::status(ctx, self.documents.current(), &self.config);
         if self.pending_focus == Some(Focus::Editor) {
-            let id = Editor::id(self.documents.current());
+            let id = Editor::id(self.documents.current(), self.active_pane);
             ctx.memory_mut(|memory| memory.request_focus(id));
             self.pending_focus = None;
         }
@@ -834,15 +1191,20 @@ impl eframe::App for Synth {
                         });
                         ui.separator();
                     }
-                    self.search_bar.show(ui, document);
-                    self.editor
-                        .show(ui, document, &self.config, self.search_bar.highlight());
+                    self.editor.prepare_state(ctx, document, self.active_pane);
+                    self.search_bar.show(ui, document, self.active_pane);
+                    self.show_panes(ui);
+                    self.remember_pane();
                 });
                 if reload && let Err(error) = self.execute(ctx, Command::Reload) {
                     self.notice = Some(error);
                 }
             });
-        self.editor.retain_documents(&self.documents);
+        self.editor.retain_documents(ctx, &self.documents);
+        for pane in self.panes.values_mut() {
+            pane.cursors
+                .retain(|id, _| self.documents.items.iter().any(|doc| doc.id == *id));
+        }
         if !self.closing
             && ctx.input(|input| input.viewport().close_requested())
             && self.documents.items.iter().any(document::Document::dirty)
@@ -864,15 +1226,15 @@ impl eframe::App for Synth {
     }
 }
 
-fn run_shortcut_shell(script: &str, directory: Option<&Path>) -> Result<(), String> {
+fn shell_command(script: &str) -> std::process::Command {
     #[cfg(unix)]
-    let mut shell = {
+    let shell = {
         let mut shell = std::process::Command::new("/bin/sh");
         shell.args(["-c", script]);
         shell
     };
     #[cfg(windows)]
-    let mut shell = {
+    let shell = {
         use std::os::windows::process::CommandExt;
 
         let executable = env::var_os("SystemRoot")
@@ -885,6 +1247,43 @@ fn run_shortcut_shell(script: &str, directory: Option<&Path>) -> Result<(), Stri
             .creation_flags(0x08000000);
         shell
     };
+    shell
+}
+
+fn format_text(script: &str, directory: Option<&Path>, text: String) -> Result<String, String> {
+    use std::io::Write as _;
+
+    let mut command = shell_command(script);
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Formatter: {}", io_message(&error)))?;
+    let mut input = child.stdin.take().ok_or("Could not open formatter stdin")?;
+    let (output, written) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || input.write_all(text.as_bytes()));
+        (child.wait_with_output(), writer.join())
+    });
+    let output = output.map_err(|error| io_message(&error))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Formatter: {} {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    written
+        .map_err(|_| "Formatter input worker stopped")?
+        .map_err(|error| io_message(&error))?;
+    String::from_utf8(output.stdout).map_err(|_| "Formatter output is not UTF-8".into())
+}
+
+fn run_shortcut_shell(script: &str, directory: Option<&Path>) -> Result<(), String> {
+    let mut shell = shell_command(script);
     if let Some(directory) = directory {
         shell.current_dir(directory);
     }
@@ -941,17 +1340,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = Config::path(&installation)?;
     let mut initial_documents = Documents::default();
     if !args.is_empty() {
-        let command = Command::parse_cli(&args, &env::current_dir()?)?;
+        let mut command = Command::parse_cli(&args, &env::current_dir()?)?;
+        if matches!(command, Command::ConfigEdit) {
+            Config::ensure_file(&config_path, &installation)?;
+            command = Command::Open(config_path.clone().into_os_string());
+        }
         let reply = match &command {
             Command::ConfigPath => Ok(config_path.display().to_string()),
             Command::ConfigCheck => check_config(&config_path),
-            Command::Open(path) => match command::dispatch_if_running(&installation, &command)? {
-                Some(reply) => reply,
-                None => {
-                    initial_documents.open(Path::new(path))?;
-                    Ok(String::new())
+            Command::Open(path) | Command::OpenEncoded(_, path) => {
+                match command::dispatch_if_running(&installation, &command)? {
+                    Some(reply) => reply,
+                    None => {
+                        let encoding = match command {
+                            Command::OpenEncoded(encoding, _) => Some(encoding),
+                            _ => None,
+                        };
+                        initial_documents.open_encoded(Path::new(path), encoding)?;
+                        Ok(String::new())
+                    }
                 }
-            },
+            }
             _ => command::dispatch(&installation, &command),
         }?;
         if !reply.is_empty() {
@@ -1007,6 +1416,39 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_panes_close_without_losing_siblings() {
+        let mut layout = PaneLayout::Leaf(0);
+        assert!(layout.split(0, 1, false));
+        assert!(layout.split(1, 2, true));
+        let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 160.0));
+        let mut panes = Vec::new();
+        layout.leaves(area, &mut panes);
+        assert_eq!(
+            panes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+        assert!(panes[0].1.right() < panes[1].1.left());
+        assert!(panes[1].1.bottom() < panes[2].1.top());
+        assert!(layout.close(1));
+        assert!(layout.close(0));
+        assert!(!layout.close(2));
+        assert!(matches!(layout, PaneLayout::Leaf(2)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn formatter_handles_large_input_without_blocking_on_output() {
+        let input = "cats and dogs\n".repeat(20_000);
+        let output = format_text("tr a-z A-Z", None, input.clone()).unwrap();
+        assert_eq!(output, input.to_uppercase());
+        assert!(
+            format_text("printf broken >&2; exit 2", None, "text".into())
+                .unwrap_err()
+                .contains("broken")
+        );
+    }
 
     #[test]
     fn shell_shortcuts_use_shell_syntax_and_the_document_directory() {

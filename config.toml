@@ -4,6 +4,10 @@
 
 [editor]
 font_size = 16.0
+tab_size = 4
+insert_spaces = false # insert a tab character when false
+auto_indent = false # carry leading whitespace onto the next line
+# formatter = "rustfmt --emit stdout" # reads and writes UTF-8 via stdin/stdout
 wrap_lines = true # wrap to the editor width, false enables horizontal scrolling
 recover_unsaved_documents = true # keep local drafts of unsaved edits and offer recovery after a crash
 
@@ -12,6 +16,9 @@ show_tabs = true
 show_line_numbers = true
 syntax_highlighting = true
 show_status_bar = true
+status_bar_height = 26.0
+status_bar_font_size = 12.0
+show_file_icons = false
 enable_search_and_replace = false # enable the search and replace bar (Ctrl+F)
 show_external_file_changes = true # show a reload prompt when the active file changes on disk
 tab_height = 36.0
@@ -51,6 +58,12 @@ Enter = "synth search next" # only while the search field has focus
 "Ctrl+0" = ["synth terminal zoom reset", "synth zoom reset"]
 # "Ctrl+Alt+F" = "synth focus toggle"
 # "Ctrl+S" = "synth save"
+# "Ctrl+Shift+S" = "synth saveall"
+# "Alt+Right" = "synth split right"
+# "Alt+Down" = "synth split down"
+# "Ctrl+F6" = "synth split focus next"
+# "Ctrl+CloseBracket" = "synth indent"
+# "Ctrl+OpenBracket" = "synth unindent"
 # "Ctrl+N" = "synth new"
 # "Ctrl+PageDown" = "synth tab next"
 # "Ctrl+PageUp" = "synth tab prev"

@@ -17,12 +17,123 @@ pub enum DiskChange {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Encoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+    Utf16LeRaw,
+    Utf16BeRaw,
+}
+
+impl Encoding {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "utf8" | "utf-8" => Ok(Self::Utf8),
+            "utf8-bom" | "utf-8-bom" => Ok(Self::Utf8Bom),
+            "utf16le" | "utf-16le" => Ok(Self::Utf16Le),
+            "utf16be" | "utf-16be" => Ok(Self::Utf16Be),
+            _ => Err("Expected utf8, utf8-bom, utf16le, or utf16be".into()),
+        }
+    }
+
+    fn accepts(self, detected: Self) -> bool {
+        self == detected
+            || matches!(
+                (self, detected),
+                (Self::Utf16Le, Self::Utf16LeRaw) | (Self::Utf16Be, Self::Utf16BeRaw)
+            )
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Utf8 => "UTF-8",
+            Self::Utf8Bom => "UTF-8 with BOM",
+            Self::Utf16Le => "UTF-16 LE",
+            Self::Utf16Be => "UTF-16 BE",
+            Self::Utf16LeRaw => "UTF-16 LE (no BOM)",
+            Self::Utf16BeRaw => "UTF-16 BE (no BOM)",
+        }
+    }
+
+    fn write(self, text: &str, output: &mut impl Write) -> io::Result<()> {
+        match self {
+            Self::Utf8 => output.write_all(text.as_bytes()),
+            Self::Utf8Bom => {
+                output.write_all(b"\xef\xbb\xbf")?;
+                output.write_all(text.as_bytes())
+            }
+            Self::Utf16Le | Self::Utf16Be | Self::Utf16LeRaw | Self::Utf16BeRaw => {
+                let little = matches!(self, Self::Utf16Le | Self::Utf16LeRaw);
+                if matches!(self, Self::Utf16Le | Self::Utf16Be) {
+                    output.write_all(if little { b"\xff\xfe" } else { b"\xfe\xff" })?;
+                }
+                let mut output = io::BufWriter::new(output);
+                for unit in text.encode_utf16() {
+                    output.write_all(&if little {
+                        unit.to_le_bytes()
+                    } else {
+                        unit.to_be_bytes()
+                    })?;
+                }
+                output.flush()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LineEnding {
+    #[default]
+    Lf,
+    Crlf,
+}
+
+impl LineEnding {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "lf" => Ok(Self::Lf),
+            "crlf" => Ok(Self::Crlf),
+            _ => Err("Expected lf or crlf".into()),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Lf => "LF",
+            Self::Crlf => "CRLF",
+        }
+    }
+
+    pub fn separator(self) -> &'static str {
+        match self {
+            Self::Lf => "\n",
+            Self::Crlf => "\r\n",
+        }
+    }
+
+    pub fn detect(text: &str) -> Self {
+        match text.find('\n') {
+            Some(index) if text[..index].ends_with('\r') => Self::Crlf,
+            _ => Self::Lf,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Draft {
     path: Option<OsString>,
     text: String,
     saved: String,
+    #[serde(default)]
     bom: bool,
+    #[serde(default)]
+    encoding: Option<Encoding>,
+    #[serde(default)]
+    saved_encoding: Option<Encoding>,
+    #[serde(default)]
+    ending: Option<LineEnding>,
     cursor: usize,
 }
 
@@ -57,9 +168,13 @@ pub struct Document {
     saved: String,
     pub dismissed_disk_change: Option<DiskChange>,
     dirty: bool,
-    bom: bool,
+    encoding: Encoding,
+    saved_encoding: Encoding,
+    pub ending: LineEnding,
+    pub selected_range: Option<Range<usize>>,
     search: Option<(String, usize)>,
     line_starts: Vec<usize>,
+    byte_starts: Vec<usize>,
     line_ends: Vec<usize>,
     char_count: usize,
 }
@@ -77,9 +192,13 @@ impl Document {
             saved: String::new(),
             dismissed_disk_change: None,
             dirty: false,
-            bom: false,
+            encoding: Encoding::Utf8,
+            saved_encoding: Encoding::Utf8,
+            ending: LineEnding::Lf,
+            selected_range: None,
             search: None,
             line_starts: vec![0],
+            byte_starts: vec![0],
             line_ends: vec![0],
             char_count: 0,
         }
@@ -90,7 +209,10 @@ impl Document {
             path: self.path.as_ref().map(|path| path.as_os_str().to_owned()),
             text: self.text.clone(),
             saved: self.saved.clone(),
-            bom: self.bom,
+            bom: self.encoding == Encoding::Utf8Bom,
+            encoding: Some(self.encoding),
+            saved_encoding: Some(self.saved_encoding),
+            ending: Some(self.ending),
             cursor: self.cursor,
         }
     }
@@ -112,36 +234,108 @@ impl Document {
             .map_or_else(|| self.name(), |path| path.display().to_string())
     }
 
-    pub fn text_changed(&mut self) {
+    fn mark_changed(&mut self) {
         self.revision += 1;
-        self.dirty = self.text != self.saved;
-        self.line_starts.clear();
-        self.line_starts.push(0);
-        self.line_ends.clear();
-        self.char_count = 0;
-        for line in self.text.split_inclusive('\n') {
-            self.char_count += line.chars().count();
-            if line.ends_with('\n') {
+        self.dirty = self.encoding != self.saved_encoding || self.text != self.saved;
+    }
+
+    pub fn text_changed(&mut self) {
+        self.reindex_from(0);
+        self.mark_changed();
+    }
+
+    fn reindex_from(&mut self, line: usize) {
+        let mut byte = self.byte_starts[line];
+        self.char_count = self.line_starts[line];
+        self.line_starts.truncate(line + 1);
+        self.byte_starts.truncate(line + 1);
+        self.line_ends.truncate(line);
+        for row in self.text[byte..].split_inclusive('\n') {
+            self.char_count += row.chars().count();
+            byte += row.len();
+            if row.ends_with('\n') {
                 self.line_ends
-                    .push(self.char_count - 1 - usize::from(line.ends_with("\r\n")));
+                    .push(self.char_count - 1 - usize::from(row.ends_with("\r\n")));
                 self.line_starts.push(self.char_count);
+                self.byte_starts.push(byte);
             }
         }
         self.line_ends.push(self.char_count);
+    }
+
+    pub fn replace_chars(&mut self, range: Range<usize>, replacement: &str) -> usize {
+        let start = range.start.min(self.char_count);
+        let end = range.end.min(self.char_count).max(start);
+        let bytes = self.byte_at_char(start)..self.byte_at_char(end);
+        let count = replacement.chars().count();
+        if self.text[bytes.clone()] == *replacement {
+            return count;
+        }
+        let line = self.position_at(start).0 - 1;
+        let last = self.position_at(end).0 - 1;
+        if line == last && !replacement.contains('\n') {
+            let delta_chars = count as isize - (end - start) as isize;
+            let delta_bytes = replacement.len() as isize - bytes.len() as isize;
+            self.text.replace_range(bytes, replacement);
+            self.char_count = self.char_count.saturating_add_signed(delta_chars);
+            for next in line + 1..self.line_starts.len() {
+                self.line_starts[next] = self.line_starts[next].saturating_add_signed(delta_chars);
+                self.byte_starts[next] = self.byte_starts[next].saturating_add_signed(delta_bytes);
+                self.line_ends[next] = self.line_ends[next].saturating_add_signed(delta_chars);
+            }
+            self.line_ends[line] = self
+                .line_starts
+                .get(line + 1)
+                .map_or(self.char_count, |next| {
+                    let byte = self.byte_starts[line + 1];
+                    next - 1 - usize::from(self.text[..byte].ends_with("\r\n"))
+                });
+        } else if let Some(&suffix) = self.byte_starts.get(last + 1) {
+            let delta_chars = count as isize - (end - start) as isize;
+            let delta_bytes = replacement.len() as isize - bytes.len() as isize;
+            self.text.replace_range(bytes, replacement);
+            let mut byte = self.byte_starts[line];
+            let mut chars = self.line_starts[line];
+            let mut starts = Vec::new();
+            let mut ends = Vec::new();
+            let mut byte_starts = Vec::new();
+            let changed_end = suffix.saturating_add_signed(delta_bytes);
+            for row in self.text[byte..changed_end].split_inclusive('\n') {
+                byte_starts.push(byte);
+                starts.push(chars);
+                byte += row.len();
+                chars += row.chars().count();
+                ends.push(chars - 1 - usize::from(row.ends_with("\r\n")));
+            }
+            for index in last + 1..self.line_starts.len() {
+                self.line_starts[index] =
+                    self.line_starts[index].saturating_add_signed(delta_chars);
+                self.line_ends[index] = self.line_ends[index].saturating_add_signed(delta_chars);
+                self.byte_starts[index] =
+                    self.byte_starts[index].saturating_add_signed(delta_bytes);
+            }
+            self.line_starts.splice(line..=last, starts);
+            self.line_ends.splice(line..=last, ends);
+            self.byte_starts.splice(line..=last, byte_starts);
+            self.char_count = self.char_count.saturating_add_signed(delta_chars);
+        } else {
+            self.text.replace_range(bytes, replacement);
+            self.reindex_from(line);
+        }
+        self.mark_changed();
+        count
     }
 
     pub fn byte_at_char(&self, index: usize) -> usize {
         if index >= self.char_count {
             return self.text.len();
         }
-        let from_end = self.char_count - 1 - index;
-        let mut chars = self.text.char_indices();
-        let position = if index <= from_end {
-            chars.nth(index)
-        } else {
-            chars.nth_back(from_end)
-        };
-        position.map_or(self.text.len(), |(byte, _)| byte)
+        let line = self.position_at(index).0 - 1;
+        let start = self.byte_starts[line];
+        self.text[start..]
+            .char_indices()
+            .nth(index - self.line_starts[line])
+            .map_or(self.text.len(), |(byte, _)| start + byte)
     }
 
     pub fn line_count(&self) -> usize {
@@ -152,14 +346,27 @@ impl Document {
         self.position_at(self.cursor)
     }
 
+    pub fn column_at(&self, cursor: usize) -> usize {
+        self.position_at(cursor).1
+    }
+
+    pub fn clamp_cursor(&self, cursor: usize) -> usize {
+        cursor.min(self.char_count)
+    }
+
     fn position_at(&self, cursor: usize) -> (usize, usize) {
+        let cursor = self.clamp_cursor(cursor);
         let line = self.line_starts.partition_point(|&start| start <= cursor);
-        (line, cursor - self.line_starts[line - 1] + 1)
+        (
+            line,
+            cursor.min(self.line_ends[line - 1]) - self.line_starts[line - 1] + 1,
+        )
     }
 
     fn move_cursor(&mut self, position: usize) {
         self.cursor = position;
         self.selection = Some(position..position);
+        self.selected_range = None;
     }
 
     pub fn goto(&mut self, line: usize, column: usize) -> Reply {
@@ -174,7 +381,152 @@ impl Document {
     }
 
     pub fn encoding(&self) -> &'static str {
-        if self.bom { "UTF-8 with BOM" } else { "UTF-8" }
+        self.encoding.label()
+    }
+
+    pub fn leading_spaces_at(&self, cursor: usize) -> &str {
+        let line = self.position_at(cursor).0 - 1;
+        let start = self.byte_starts[line];
+        let end = self.byte_at_char(cursor);
+        let prefix = &self.text[start..end];
+        &prefix[..prefix.len() - prefix.trim_start_matches([' ', '\t']).len()]
+    }
+
+    pub fn duplicate_line(&mut self) -> Reply {
+        let (line, column) = self.position();
+        let index = line - 1;
+        let contents =
+            &self.text[self.byte_starts[index]..self.byte_at_char(self.line_ends[index])];
+        let ending = self.ending.separator();
+        let (at, inserted) = if let Some(next) = self.line_starts.get(index + 1) {
+            (*next, format!("{contents}{ending}"))
+        } else {
+            (self.char_count, format!("{ending}{contents}"))
+        };
+        self.replace_chars(at..at, &inserted);
+        self.goto(line + 1, column)
+    }
+
+    pub fn move_line(&mut self, down: bool) -> Reply {
+        let (line, column) = self.position();
+        let first = if down {
+            line - 1
+        } else {
+            line.saturating_sub(2)
+        };
+        let lines = self.line_count() - usize::from(self.text.ends_with('\n'));
+        if (!down && line == 1) || first + 1 >= lines {
+            return Err("No line in that direction".into());
+        }
+        let second = first + 1;
+        let start = self.line_starts[first];
+        let end = self.line_ends[second];
+        let a = &self.text[self.byte_starts[first]..self.byte_at_char(self.line_ends[first])];
+        let b = &self.text[self.byte_starts[second]..self.byte_at_char(end)];
+        let separator =
+            &self.text[self.byte_at_char(self.line_ends[first])..self.byte_starts[second]];
+        let replacement = format!("{b}{separator}{a}");
+        self.replace_chars(start..end, &replacement);
+        self.goto(if down { line + 1 } else { line - 1 }, column)
+    }
+
+    pub fn indent(&mut self, increase: bool, spaces: bool, size: usize) -> Reply {
+        let selected = self
+            .selection
+            .as_ref()
+            .or(self.selected_range.as_ref())
+            .filter(|range| !range.is_empty())
+            .cloned();
+        let (start, end) = selected
+            .as_ref()
+            .map_or((self.cursor, self.cursor), |range| {
+                (range.start, range.end - 1)
+            });
+        let (first, column) = self.position_at(start);
+        let last = self.position_at(end).0;
+        let prefix = if spaces {
+            " ".repeat(size)
+        } else {
+            "\t".to_owned()
+        };
+        let start = self.line_starts[first - 1];
+        let end = self.line_ends[last - 1];
+        let first_offset = self.byte_starts[first - 1];
+        let range = &self.text[first_offset..self.byte_at_char(end)];
+        let mut replacement = String::with_capacity(range.len());
+        let mut first_change = 0;
+        for (index, row) in range
+            .split_inclusive('\n')
+            .chain((range.is_empty() || range.ends_with('\n')).then_some(""))
+            .enumerate()
+        {
+            if increase {
+                replacement.push_str(&prefix);
+                replacement.push_str(row);
+            } else {
+                let trim = if row.starts_with('\t') {
+                    1
+                } else {
+                    row.bytes()
+                        .take(size)
+                        .take_while(|&byte| byte == b' ')
+                        .count()
+                };
+                if index == 0 {
+                    first_change = trim;
+                }
+                replacement.push_str(&row[trim..]);
+            }
+        }
+        let count = self.replace_chars(start..end, &replacement);
+        if selected.is_some() {
+            self.cursor = start + count;
+            self.selection = Some(start..self.cursor);
+            self.selected_range = self.selection.clone();
+        } else {
+            let column = if increase {
+                column + prefix.len()
+            } else {
+                column.saturating_sub(first_change).max(1)
+            };
+            self.goto(first, column)?;
+        }
+        Ok(format!(
+            "{first}–{last}: {}",
+            if increase { "indented" } else { "unindented" }
+        ))
+    }
+
+    pub fn set_encoding(&mut self, encoding: Encoding) -> Reply {
+        self.encoding = encoding;
+        self.mark_changed();
+        Ok(format!("Encoding: {}", self.encoding()))
+    }
+
+    pub fn replace_formatted(&mut self, text: String, cursor: (usize, usize)) -> Reply {
+        self.text = text;
+        self.set_ending_at(self.ending, cursor)
+    }
+
+    pub fn set_ending(&mut self, ending: LineEnding) -> Reply {
+        self.set_ending_at(ending, self.position())
+    }
+
+    fn set_ending_at(&mut self, ending: LineEnding, cursor: (usize, usize)) -> Reply {
+        self.ending = ending;
+        let mut text = String::with_capacity(self.text.len());
+        for row in self.text.split_inclusive('\n') {
+            if let Some(content) = row.strip_suffix('\n') {
+                text.push_str(content.strip_suffix('\r').unwrap_or(content));
+                text.push_str(ending.separator());
+            } else {
+                text.push_str(row);
+            }
+        }
+        self.text = text;
+        self.text_changed();
+        self.goto(cursor.0.min(self.line_count()), cursor.1)?;
+        Ok(format!("Line endings: {}", ending.label()))
     }
 
     fn properties(&self) -> String {
@@ -183,8 +535,9 @@ impl Document {
         let encoding = self.encoding();
         let modified = if self.dirty() { "yes" } else { "no" };
         format!(
-            "{}\nModified: {modified}\nEncoding: {encoding}\nLines: {lines}\nCursor: {line}:{column}",
-            self.display_path()
+            "{}\nModified: {modified}\nEncoding: {encoding}\nLine endings: {}\nLines: {lines}\nCursor: {line}:{column}",
+            self.display_path(),
+            self.ending.label()
         )
     }
 
@@ -193,10 +546,10 @@ impl Document {
         if !path.is_file() {
             return Some(DiskChange::Unavailable);
         }
-        let Ok((text, bom)) = read_file(path) else {
+        let Ok((text, bom)) = read_file(path, Some(self.saved_encoding)) else {
             return Some(DiskChange::Unavailable);
         };
-        if text == self.saved && bom == self.bom {
+        if text == self.saved && bom == self.saved_encoding {
             return None;
         }
         let mut hash = DefaultHasher::new();
@@ -224,17 +577,12 @@ impl Document {
         let parent = target.parent().ok_or("Expected a parent directory")?;
         let mut output =
             tempfile::NamedTempFile::new_in(parent).map_err(|error| file_error(&target, error))?;
-        if self.bom {
-            output
-                .write_all(b"\xef\xbb\xbf")
-                .map_err(|error| file_error(&target, error))?;
-        }
-        output
-            .write_all(self.text.as_bytes())
+        self.encoding
+            .write(&self.text, &mut output)
             .map_err(|error| file_error(&target, error))?;
         if replace {
-            let (disk, bom) = read_file(&target)?;
-            if disk != self.saved || bom != self.bom {
+            let (disk, bom) = read_file(&target, Some(self.saved_encoding))?;
+            if disk != self.saved || bom != self.saved_encoding {
                 return Err(format!(
                     "{} changed on disk. Use synth saveas PATH to save a copy.",
                     target.display()
@@ -260,6 +608,7 @@ impl Document {
         .map_err(|error| file_error(&target, error.error))?;
 
         self.saved.clone_from(&self.text);
+        self.saved_encoding = self.encoding;
         self.dismissed_disk_change = None;
         self.dirty = false;
         let message = format!("Saved {}", target.display());
@@ -297,19 +646,62 @@ fn file_error(path: &Path, error: io::Error) -> String {
     format!("{}: {}", path.display(), crate::io_message(&error))
 }
 
-fn read_file(path: &Path) -> Result<(String, bool), String> {
-    let mut text = fs::read_to_string(path).map_err(|error| file_error(path, error))?;
-    let bom = text.starts_with('\u{feff}');
-    if bom {
-        text.drain(..'\u{feff}'.len_utf8());
+fn read_file(path: &Path, preferred: Option<Encoding>) -> Result<(String, Encoding), String> {
+    let bytes = fs::read(path).map_err(|error| file_error(path, error))?;
+    let invalid = || format!("{}: invalid or unsupported text encoding", path.display());
+    if bytes.starts_with(b"\xff\xfe\0\0") || bytes.starts_with(b"\0\0\xfe\xff") {
+        return Err(invalid());
     }
-    Ok((text, bom))
+    let (encoding, prefix) = if bytes.starts_with(b"\xff\xfe") {
+        (Encoding::Utf16Le, 2)
+    } else if bytes.starts_with(b"\xfe\xff") {
+        (Encoding::Utf16Be, 2)
+    } else if bytes.starts_with(b"\xef\xbb\xbf") {
+        (Encoding::Utf8Bom, 3)
+    } else {
+        (
+            match preferred {
+                Some(Encoding::Utf16Le | Encoding::Utf16LeRaw) => Encoding::Utf16LeRaw,
+                Some(Encoding::Utf16Be | Encoding::Utf16BeRaw) => Encoding::Utf16BeRaw,
+                _ => Encoding::Utf8,
+            },
+            0,
+        )
+    };
+    let text = match encoding {
+        Encoding::Utf16Le | Encoding::Utf16Be | Encoding::Utf16LeRaw | Encoding::Utf16BeRaw => {
+            let (chunks, remainder) = bytes[prefix..].as_chunks::<2>();
+            if !remainder.is_empty() {
+                return Err(invalid());
+            }
+            let units = chunks.iter().copied().map(|unit| {
+                if matches!(encoding, Encoding::Utf16Le | Encoding::Utf16LeRaw) {
+                    u16::from_le_bytes(unit)
+                } else {
+                    u16::from_be_bytes(unit)
+                }
+            });
+            char::decode_utf16(units)
+                .collect::<Result<String, _>>()
+                .map_err(|_| invalid())?
+        }
+        _ => {
+            if bytes[prefix..].contains(&0) {
+                return Err(invalid());
+            }
+            let mut text = String::from_utf8(bytes).map_err(|_| invalid())?;
+            text.drain(..prefix);
+            text
+        }
+    };
+    Ok((text, encoding))
 }
 
 pub struct Documents {
     pub items: Vec<Document>,
     pub active: usize,
     next_id: u64,
+    closed: Vec<(Option<PathBuf>, Encoding)>,
 }
 
 impl Default for Documents {
@@ -318,6 +710,7 @@ impl Default for Documents {
             items: vec![Document::empty(0)],
             active: 0,
             next_id: 1,
+            closed: Vec::new(),
         }
     }
 }
@@ -338,6 +731,10 @@ impl Documents {
     }
 
     pub fn open(&mut self, path: &Path) -> Reply {
+        self.open_encoded(path, None)
+    }
+
+    pub fn open_encoded(&mut self, path: &Path, encoding: Option<Encoding>) -> Reply {
         let path = fs::canonicalize(path).map_err(|error| file_error(path, error))?;
         if let Some(index) = self
             .items
@@ -349,13 +746,25 @@ impl Documents {
             if !path.is_file() {
                 return Err(format!("{} is not a regular file", path.display()));
             }
-            let (text, bom) = read_file(&path)?;
+            let (text, detected) = read_file(&path, encoding)?;
+            if let Some(encoding) = encoding
+                && !encoding.accepts(detected)
+            {
+                return Err(format!(
+                    "{} uses {}, expected {}",
+                    path.display(),
+                    detected.label(),
+                    encoding.label()
+                ));
+            }
             let mut document = Document::empty(self.next_id);
             self.next_id += 1;
             document.text = text;
             document.saved.clone_from(&document.text);
+            document.ending = LineEnding::detect(&document.text);
+            document.encoding = detected;
+            document.saved_encoding = detected;
             document.text_changed();
-            document.bom = bom;
             document.path = Some(path.clone());
             if self.current().id == 0
                 && self.current().path.is_none()
@@ -377,7 +786,15 @@ impl Documents {
         document.path = draft.path.map(PathBuf::from);
         document.text = draft.text;
         document.saved = draft.saved;
-        document.bom = draft.bom;
+        document.encoding = draft.encoding.unwrap_or(if draft.bom {
+            Encoding::Utf8Bom
+        } else {
+            Encoding::Utf8
+        });
+        document.saved_encoding = draft.saved_encoding.unwrap_or(document.encoding);
+        document.ending = draft
+            .ending
+            .unwrap_or_else(|| LineEnding::detect(&document.text));
         document.text_changed();
         document.move_cursor(draft.cursor.min(document.char_count));
         let existing = self.items.iter().position(|open| {
@@ -412,13 +829,15 @@ impl Documents {
                 path.display()
             ));
         }
-        let (text, bom) = read_file(path)?;
+        let (text, bom) = read_file(path, Some(document.saved_encoding))?;
         let reply = format!("Reloaded {}", path.display());
         let cursor = document.cursor;
         document.text = text;
         document.saved.clone_from(&document.text);
+        document.encoding = bom;
+        document.saved_encoding = bom;
+        document.ending = LineEnding::detect(&document.text);
         document.text_changed();
-        document.bom = bom;
         document.search = None;
         document.dismissed_disk_change = None;
         document.move_cursor(cursor.min(document.char_count));
@@ -437,13 +856,63 @@ impl Documents {
                 "Document has unsaved changes. Save it or use synth close --discard.".into(),
             );
         }
-        let closed = self.items.remove(self.active).name();
+        let document = self.items.remove(self.active);
+        let closed = document.name();
+        if document.path.is_some() {
+            self.closed
+                .retain(|(previous, _)| previous != &document.path);
+        }
+        self.closed.push((document.path, document.saved_encoding));
+        if self.closed.len() > 32 {
+            self.closed.remove(0);
+        }
         if self.items.is_empty() {
             self.create();
         } else {
             self.active = self.active.min(self.items.len() - 1);
         }
         Ok(format!("Closed {closed}"))
+    }
+
+    pub fn reopen(&mut self) -> Reply {
+        let (path, encoding) = self
+            .closed
+            .last()
+            .cloned()
+            .ok_or("No recently closed document")?;
+        let reply = if let Some(path) = path {
+            let raw = matches!(encoding, Encoding::Utf16LeRaw | Encoding::Utf16BeRaw);
+            self.open_encoded(&path, raw.then_some(encoding))?
+        } else {
+            self.create();
+            "Reopened untitled document".into()
+        };
+        self.closed.pop();
+        Ok(reply)
+    }
+
+    pub fn select(&mut self, number: usize) -> Reply {
+        if !(1..=self.items.len()).contains(&number) {
+            return Err(format!("Tab {number} does not exist"));
+        }
+        self.active = number - 1;
+        Ok(format!("Active: {}", self.current().display_path()))
+    }
+
+    pub fn save_all(&mut self) -> Reply {
+        let mut saved = 0;
+        let mut errors = Vec::new();
+        for document in self.items.iter_mut().filter(|doc| doc.dirty()) {
+            match document.save(None) {
+                Ok(_) => saved += 1,
+                Err(error) => errors.push(format!("{}: {error}", document.name())),
+            }
+        }
+        if errors.is_empty() {
+            Ok(format!("Saved {saved} documents"))
+        } else {
+            Err(format!("Saved {saved} documents. {}", errors.join("\n")))
+        }
     }
 
     pub fn properties(&self) -> String {
@@ -477,6 +946,103 @@ impl Documents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incremental_edits_match_a_full_index_with_unicode_and_crlf() {
+        let mut document = Document::empty(1);
+        document.text = "é猫\r\nline\nおわり".into();
+        document.text_changed();
+        for (range, replacement) in [
+            (0..1, "🦀"),
+            (3..5, ""),
+            (1..2, "\r\n"),
+            (0..0, "α"),
+            (5..6, "終"),
+        ] {
+            document.replace_chars(range, replacement);
+            let mut expected = Document::empty(2);
+            expected.text.clone_from(&document.text);
+            expected.text_changed();
+            assert_eq!(document.line_starts, expected.line_starts);
+            assert_eq!(document.byte_starts, expected.byte_starts);
+            assert_eq!(document.line_ends, expected.line_ends);
+            assert_eq!(document.char_count, expected.char_count);
+        }
+    }
+
+    #[test]
+    fn encodings_round_trip_and_conversion_is_dirty_without_a_text_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "é🦀\r\n猫";
+        for encoding in [
+            Encoding::Utf8,
+            Encoding::Utf8Bom,
+            Encoding::Utf16Le,
+            Encoding::Utf16Be,
+            Encoding::Utf16LeRaw,
+            Encoding::Utf16BeRaw,
+        ] {
+            let path = dir.path().join(format!("{encoding:?}.txt"));
+            let mut bytes = Vec::new();
+            encoding.write(original, &mut bytes).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let mut docs = Documents::default();
+            let explicit =
+                matches!(encoding, Encoding::Utf16LeRaw | Encoding::Utf16BeRaw).then_some(encoding);
+            docs.open_encoded(&path, explicit).unwrap();
+            assert_eq!(docs.current().text, original);
+            assert_eq!(docs.current().encoding, encoding);
+            assert_eq!(docs.current().ending, LineEnding::Crlf);
+            docs.save(None).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            let target = if encoding == Encoding::Utf8 {
+                Encoding::Utf16Be
+            } else {
+                Encoding::Utf8
+            };
+            docs.current_mut().set_encoding(target).unwrap();
+            assert!(docs.current().dirty());
+            docs.save_all().unwrap();
+            assert_eq!(
+                read_file(&path, None).unwrap(),
+                (original.to_owned(), target)
+            );
+            docs.close(false).unwrap();
+            docs.reopen().unwrap();
+            assert_eq!(docs.current().text, original);
+        }
+        let path = dir.path().join("invalid");
+        for data in [
+            &b"\xff\xfe\x00\xd8"[..],
+            b"\xfe\xffx",
+            b"\x80",
+            b"\xff\xfe\0\0x\0\0\0",
+        ] {
+            fs::write(&path, data).unwrap();
+            assert!(Documents::default().open(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), data);
+        }
+    }
+
+    #[test]
+    fn line_operations_keep_logical_cursor_selection_and_endings() {
+        let mut doc = Document::empty(1);
+        doc.text = "猫\r\nb\r\nlast".into();
+        doc.text_changed();
+        doc.ending = LineEnding::Crlf;
+        doc.goto(3, 2).unwrap();
+        doc.move_line(false).unwrap();
+        assert_eq!(doc.text, "猫\r\nlast\r\nb");
+        assert_eq!(doc.position(), (2, 2));
+        doc.duplicate_line().unwrap();
+        assert_eq!(doc.text, "猫\r\nlast\r\nlast\r\nb");
+        doc.selection = Some(0..doc.line_starts[2]);
+        doc.indent(true, true, 2).unwrap();
+        assert_eq!(doc.text, "  猫\r\n  last\r\nlast\r\nb");
+        doc.indent(false, true, 2).unwrap();
+        doc.set_ending(LineEnding::Lf).unwrap();
+        assert_eq!(doc.text, "猫\nlast\nlast\nb");
+    }
 
     #[test]
     fn char_offsets_match_utf8_boundaries_after_edits() {
@@ -632,7 +1198,7 @@ mod tests {
         assert_eq!(document.text, "猫");
         assert_eq!(document.selection, Some(1..1));
         assert_eq!(document.position(), (1, 2));
-        assert!(document.bom);
+        assert_eq!(document.encoding, Encoding::Utf8Bom);
         assert!(!document.dirty());
     }
 

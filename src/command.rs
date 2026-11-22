@@ -56,6 +56,8 @@ impl Zoom {
     }
 }
 
+use crate::document::{Encoding, LineEnding};
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
     Open(OsString),
@@ -87,6 +89,21 @@ pub enum Command {
     ConfigPath,
     ConfigCheck,
     ConfigReload,
+    SaveAll,
+    SelectTab(usize),
+    Reopen,
+    DuplicateLine,
+    MoveLine(bool),
+    Indent(bool),
+    Format,
+    RestartTerminal,
+    ConfigEdit,
+    Split(bool),
+    SplitClose,
+    SplitNext,
+    Encoding(Encoding),
+    OpenEncoded(Encoding, OsString),
+    LineEnding(LineEnding),
 }
 
 pub const USAGE: &str = "Usage: synth COMMAND [ARGS]\nRun 'synth help' for a list of commands.";
@@ -100,7 +117,16 @@ pub fn help() -> String {
             &[
                 ("new", "Create an untitled document"),
                 ("open PATH", "Open a file or switch to it"),
+                (
+                    "open --encoding E PATH",
+                    "Open a file with an explicit encoding",
+                ),
                 ("save", "Save the active document"),
+                ("saveall", "Save all modified files"),
+                ("reopen", "Reopen the last closed file"),
+                ("encoding NAME", "Choose utf8, utf8-bom, utf16le or utf16be"),
+                ("eol lf|crlf", "Change line endings"),
+                ("format", "Run the configured formatter"),
                 ("saveas PATH", "Save the active document to PATH"),
                 ("reload", "Reload the active document from disk"),
                 ("goto LINE[:COLUMN]", "Move the cursor to a line and column"),
@@ -116,6 +142,11 @@ pub fn help() -> String {
                 ("tab list", "List all open documents"),
                 ("tab next", "Switch to the next tab"),
                 ("tab prev", "Switch to the previous tab"),
+                ("tab NUMBER", "Switch to a tab by its one-based number"),
+                ("split right", "Split the active pane side by side"),
+                ("split down", "Split the active pane top and bottom"),
+                ("split close", "Close the active pane"),
+                ("split focus next", "Focus the next pane"),
             ],
         ),
         (
@@ -143,6 +174,7 @@ pub fn help() -> String {
                     "Change terminal font size (in, out, reset)",
                 ),
                 ("terminal hide", "Hide the terminal panel"),
+                ("terminal restart", "Restart the shell session"),
                 (
                     "terminal image PATH",
                     "Display a PNG or JPEG in the terminal",
@@ -154,6 +186,7 @@ pub fn help() -> String {
             "CONFIGURATION",
             &[
                 ("config path", "Print the configuration path"),
+                ("config edit", "Open config.toml in the editor"),
                 ("config check", "Validate the configuration"),
                 ("config reload", "Reload configuration from disk"),
             ],
@@ -162,6 +195,10 @@ pub fn help() -> String {
             "GENERAL",
             &[
                 ("dialog cancel", "Dismiss the current confirmation dialog"),
+                ("duplicate line", "Duplicate the current line"),
+                ("line move up|down", "Move the current line"),
+                ("indent", "Indent the selected lines"),
+                ("unindent", "Unindent the selected lines"),
                 ("zoom ACTION", "Scale the whole interface (in, out, reset)"),
                 ("help", "Display this help"),
                 ("-h, --help", "Display this help"),
@@ -188,6 +225,11 @@ impl Command {
     pub fn parse(args: &[OsString], directory: &Path) -> Result<Self, String> {
         let word = |index: usize| args.get(index).and_then(|arg| arg.to_str()).unwrap_or("");
         match (args.len(), word(0), word(1)) {
+            (4.., "open", "--encoding") => {
+                let encoding = Encoding::parse(word(2))?;
+                path_argument(directory, &args[3..]).map(|path| Self::OpenEncoded(encoding, path))
+            }
+            (2.., "open", "--encoding") => Err("Expected open --encoding ENCODING PATH".into()),
             (2.., "open", _) => path_argument(directory, &args[1..]).map(Self::Open),
             (1, "new", _) => Ok(Self::New),
             (1, "save", _) => Ok(Self::Save),
@@ -229,6 +271,26 @@ impl Command {
             (2, "config", "path") => Ok(Self::ConfigPath),
             (2, "config", "check") => Ok(Self::ConfigCheck),
             (2, "config", "reload") => Ok(Self::ConfigReload),
+            (1, "saveall", _) => Ok(Self::SaveAll),
+            (1, "reopen", _) => Ok(Self::Reopen),
+            (1, "format", _) => Ok(Self::Format),
+            (1, "indent", _) => Ok(Self::Indent(true)),
+            (1, "unindent", _) => Ok(Self::Indent(false)),
+            (2, "duplicate", "line") => Ok(Self::DuplicateLine),
+            (3, "line", "move") if matches!(word(2), "up" | "down") => {
+                Ok(Self::MoveLine(word(2) == "down"))
+            }
+            (2, "tab", number) => number
+                .parse()
+                .map(Self::SelectTab)
+                .map_err(|_| "Expected a tab number".into()),
+            (2, "terminal", "restart") => Ok(Self::RestartTerminal),
+            (2, "config", "edit") => Ok(Self::ConfigEdit),
+            (2, "split", "right" | "down") => Ok(Self::Split(word(1) == "down")),
+            (2, "split", "close") => Ok(Self::SplitClose),
+            (3, "split", "focus") if word(2) == "next" => Ok(Self::SplitNext),
+            (2, "encoding", value) => Encoding::parse(value).map(Self::Encoding),
+            (2, "eol", value) => LineEnding::parse(value).map(Self::LineEnding),
             _ => Err(USAGE.into()),
         }
     }
@@ -607,7 +669,7 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("  "))
             .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 33);
+        assert_eq!(rows.len(), 50);
         for row in rows {
             assert_eq!(&row[24..26], "  ");
         }

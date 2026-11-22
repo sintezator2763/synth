@@ -14,24 +14,230 @@ use syntect::{
 use crate::{
     config::{Config, Palette},
     cursor_trail::{Cursor, Target, Trail},
-    document::{Document, Documents},
+    document::{Document, Documents, LineEnding},
 };
+
+struct EditBuffer<'a> {
+    document: &'a mut Document,
+    config: &'a crate::config::Editor,
+}
+
+impl EditBuffer<'_> {
+    fn insertion_cursor(&self, cursor: usize) -> usize {
+        let cursor = self.document.clamp_cursor(cursor);
+        let byte = self.document.byte_at_char(cursor);
+        if self.document.text[..byte].ends_with('\r')
+            && self.document.text[byte..].starts_with('\n')
+        {
+            cursor - 1
+        } else {
+            cursor
+        }
+    }
+
+    fn deletion_range(&self, mut range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+        if range.is_empty() {
+            return range;
+        }
+        let text = &self.document.text;
+        let start = self.document.byte_at_char(range.start);
+        let end = self.document.byte_at_char(range.end);
+        if text[..start].ends_with('\r') && text[start..].starts_with('\n') {
+            range.start -= 1;
+        }
+        if text[..end].ends_with('\r') && text[end..].starts_with('\n') {
+            range.end += 1;
+        }
+        range
+    }
+}
+
+impl egui::TextBuffer for EditBuffer<'_> {
+    fn is_mutable(&self) -> bool {
+        true
+    }
+    fn as_str(&self) -> &str {
+        &self.document.text
+    }
+
+    fn insert_text(&mut self, text: &str, cursor: usize) -> usize {
+        let cursor = self.insertion_cursor(cursor);
+        let mut insertion = std::borrow::Cow::Borrowed(text);
+        if text == "\t" && self.config.insert_spaces {
+            let column = self.document.column_at(cursor);
+            insertion = " "
+                .repeat(self.config.tab_size - (column - 1) % self.config.tab_size)
+                .into();
+        } else if text == "\n" && self.config.auto_indent {
+            insertion = format!("\n{}", self.document.leading_spaces_at(cursor)).into();
+        }
+        if self.document.ending == LineEnding::Crlf && insertion.contains('\n') {
+            insertion = insertion.replace("\r\n", "\n").replace('\n', "\r\n").into();
+        } else if self.document.ending == LineEnding::Lf && insertion.contains("\r\n") {
+            insertion = insertion.replace("\r\n", "\n").into();
+        }
+        self.document.replace_chars(cursor..cursor, &insertion)
+    }
+
+    fn insert_text_at(&mut self, cursor: &mut CCursor, text: &str, char_limit: usize) {
+        cursor.index = self.insertion_cursor(cursor.index);
+        let text = if char_limit == usize::MAX {
+            text
+        } else {
+            let remaining = char_limit.saturating_sub(self.as_str().chars().count());
+            text.char_indices()
+                .nth(remaining)
+                .map_or(text, |(byte, _)| &text[..byte])
+        };
+        cursor.index += self.insert_text(text, cursor.index);
+    }
+
+    fn decrease_indentation(&mut self, cursor: &mut CCursor) {
+        let doc = &mut self.document;
+        let column = doc.column_at(cursor.index);
+        let row = doc.clamp_cursor(cursor.index) + 1 - column;
+        let suffix = &doc.text[doc.byte_at_char(row)..];
+        let remove = if suffix.starts_with('\t') {
+            1
+        } else {
+            suffix
+                .bytes()
+                .take(self.config.tab_size)
+                .take_while(|&byte| byte == b' ')
+                .count()
+        };
+        doc.replace_chars(row..row + remove, "");
+        cursor.index = cursor.index.saturating_sub(remove).max(row);
+    }
+
+    fn delete_char_range(&mut self, range: std::ops::Range<usize>) {
+        let range = self.deletion_range(range);
+        self.document.replace_chars(range, "");
+    }
+
+    fn delete_selected_ccursor_range(&mut self, [min, max]: [CCursor; 2]) -> CCursor {
+        let range = self.deletion_range(min.index..max.index);
+        let cursor = self.insertion_cursor(range.start);
+        self.document.replace_chars(range, "");
+        CCursor::new(cursor)
+    }
+
+    fn byte_index_from_char_index(&self, index: usize) -> usize {
+        self.document.byte_at_char(index)
+    }
+
+    fn replace_with(&mut self, text: &str) {
+        if text.contains('\n') {
+            self.document.ending = LineEnding::detect(text);
+        }
+        self.document.text.clear();
+        self.document.text.push_str(text);
+        self.document.text_changed();
+    }
+}
+
+fn resize_tabs(job: &mut LayoutJob, width: usize, ui: &Ui) {
+    let mut sections = Vec::with_capacity(job.sections.len());
+    for section in std::mem::take(&mut job.sections) {
+        let mut start = section.byte_range.start;
+        let mut leading = section.leading_space;
+        for (offset, _) in job.text[section.byte_range.clone()].match_indices('\t') {
+            let tab = section.byte_range.start + offset;
+            if start < tab {
+                sections.push(egui::text::LayoutSection {
+                    byte_range: start..tab,
+                    leading_space: std::mem::take(&mut leading),
+                    format: section.format.clone(),
+                });
+            }
+            let mut format = section.format.clone();
+            format.line_height = Some(ui.fonts(|fonts| fonts.row_height(&format.font_id)));
+            format.font_id.size *= width as f32 / 4.0;
+            sections.push(egui::text::LayoutSection {
+                byte_range: tab..tab + 1,
+                leading_space: std::mem::take(&mut leading),
+                format,
+            });
+            start = tab + 1;
+        }
+        if start < section.byte_range.end {
+            sections.push(egui::text::LayoutSection {
+                byte_range: start..section.byte_range.end,
+                leading_space: leading,
+                format: section.format,
+            });
+        }
+    }
+    job.sections = sections;
+}
 
 #[derive(Default)]
 pub struct Editor {
     syntax: Option<SyntaxLayouts>,
     trail: Trail,
+    shared_state: HashMap<u64, egui::text_edit::TextEditState>,
+    prepared_views: std::collections::HashSet<(u64, u64)>,
 }
 
 impl Editor {
     pub fn reset_highlighting(&mut self) {
         self.syntax = None;
     }
-    pub fn id(document: &Document) -> egui::Id {
-        egui::Id::new(("document", document.id))
+    pub fn id(document: &Document, pane: u64) -> egui::Id {
+        egui::Id::new(("document", document.id, pane))
     }
 
-    pub fn retain_documents(&mut self, documents: &Documents) {
+    pub fn prepare_state(&mut self, ctx: &egui::Context, document: &Document, pane: u64) {
+        if !self.prepared_views.insert((document.id, pane)) {
+            return;
+        }
+        let id = Self::id(document, pane);
+        let local = TextEdit::load_state(ctx, id).unwrap_or_default();
+        let mut state = self.shared_state.entry(document.id).or_default().clone();
+        state.cursor = local.cursor;
+        state.store(ctx, id);
+    }
+
+    pub fn add_undo(&mut self, ctx: &egui::Context, document: &Document, pane: u64) {
+        self.prepare_state(ctx, document, pane);
+        let id = Self::id(document, pane);
+        let mut state = TextEdit::load_state(ctx, id).unwrap_or_default();
+        let mut undoer = state.undoer();
+        undoer.add_undo(&(
+            CCursorRange::one(CCursor::new(document.cursor)),
+            document.text.clone(),
+        ));
+        state.set_undoer(undoer);
+        state.store(ctx, id);
+    }
+
+    pub fn forget_pane(&mut self, ctx: &egui::Context, pane: u64) {
+        self.prepared_views.retain(|&(id, view)| {
+            if pane == view {
+                ctx.data_mut(|data| {
+                    data.remove::<egui::text_edit::TextEditState>(egui::Id::new((
+                        "document", id, view,
+                    )))
+                });
+            }
+            pane != view
+        });
+    }
+
+    pub fn retain_documents(&mut self, ctx: &egui::Context, documents: &Documents) {
+        self.prepared_views.retain(|&(id, pane)| {
+            let keep = documents.items.iter().any(|doc| doc.id == id);
+            if !keep {
+                ctx.data_mut(|data| {
+                    data.remove::<egui::text_edit::TextEditState>(egui::Id::new((
+                        "document", id, pane,
+                    )))
+                });
+            }
+            keep
+        });
+        self.shared_state
+            .retain(|id, _| documents.items.iter().any(|document| document.id == *id));
         if let Some(syntax) = &mut self.syntax {
             syntax
                 .cached
@@ -44,10 +250,12 @@ impl Editor {
         ui: &mut Ui,
         document: &mut Document,
         config: &Config,
+        pane: u64,
         search_match: Option<&std::ops::Range<usize>>,
-    ) {
+    ) -> bool {
+        self.prepare_state(ui.ctx(), document, pane);
         let font = FontId::monospace(config.editor.font_size);
-        let id = Self::id(document);
+        let id = Self::id(document, pane);
         let selected = document.selection.take();
         if let Some(range) = &selected {
             let mut state = TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
@@ -91,152 +299,178 @@ impl Editor {
             } else {
                 LayoutJob::simple(text.to_owned(), font.clone(), foreground, wrap_width)
             };
+            if config.editor.tab_size != 4 && job.text.contains('\t') {
+                resize_tabs(&mut job, config.editor.tab_size, ui);
+            }
             job.wrap.max_width = wrap_width;
             ui.fonts(|fonts| fonts.layout_job(job))
         };
         let scroll = ScrollArea::new([!wrap_lines, true]).id_salt(id);
-        scroll.show(ui, |ui| {
-            let mut area = ui.available_rect_before_wrap();
-            let gutter_right = area.left() + gutter;
-            area.min.x = gutter_right;
-            let mut editor = ui.new_child(
-                UiBuilder::new()
-                    .max_rect(area)
-                    .layout(Layout::top_down(Align::Min)),
-            );
-            let line_shape = ui.painter().add(egui::Shape::Noop);
-            let output = TextEdit::multiline(&mut document.text)
-                .id(id)
-                .font(font.clone())
-                .lock_focus(true)
-                .frame(false)
-                .margin(egui::Margin::ZERO)
-                .min_size(area.size())
-                .desired_width(f32::INFINITY)
-                .desired_rows(1)
-                .layouter(&mut layout)
-                .show(&mut editor);
-            ui.advance_cursor_after_rect(editor.min_rect().union(area));
-            if output.response.changed() {
-                document.text_changed();
-            }
-            if let Some(range) = output.cursor_range {
-                document.cursor = range.primary.ccursor.index;
-                if output.response.has_focus() {
-                    let caret = output
-                        .galley
-                        .pos_from_cursor(&range.primary)
-                        .translate(output.galley_pos.to_vec2());
-                    let line =
-                        egui::Rect::from_x_y_ranges(ui.clip_rect().x_range(), caret.y_range())
-                            .intersect(ui.clip_rect());
-                    if line.is_positive() {
-                        ui.painter().set(
-                            line_shape,
-                            egui::Shape::rect_filled(line, 0.0, config.palette().current_line),
-                        );
+        scroll
+            .show(ui, |ui| {
+                let mut area = ui.available_rect_before_wrap();
+                let gutter_right = area.left() + gutter;
+                area.min.x = gutter_right;
+                let mut editor = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(area)
+                        .layout(Layout::top_down(Align::Min)),
+                );
+                let line_shape = ui.painter().add(egui::Shape::Noop);
+                let mut buffer = EditBuffer {
+                    document,
+                    config: &config.editor,
+                };
+                let output = TextEdit::multiline(&mut buffer)
+                    .id(id)
+                    .font(font.clone())
+                    .lock_focus(true)
+                    .frame(false)
+                    .margin(egui::Margin::ZERO)
+                    .min_size(area.size())
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(1)
+                    .layouter(&mut layout)
+                    .show(&mut editor);
+                ui.advance_cursor_after_rect(editor.min_rect().union(area));
+                if let Some(range) = output.cursor_range {
+                    document.cursor = range.primary.ccursor.index;
+                    let other = range.secondary.ccursor.index;
+                    document.selected_range = (document.cursor != other)
+                        .then_some(document.cursor.min(other)..document.cursor.max(other));
+                    if output.response.has_focus() {
+                        let caret = output
+                            .galley
+                            .pos_from_cursor(&range.primary)
+                            .translate(output.galley_pos.to_vec2());
+                        let line =
+                            egui::Rect::from_x_y_ranges(ui.clip_rect().x_range(), caret.y_range())
+                                .intersect(ui.clip_rect());
+                        if line.is_positive() {
+                            ui.painter().set(
+                                line_shape,
+                                egui::Shape::rect_filled(line, 0.0, config.palette().current_line),
+                            );
+                        }
                     }
                 }
-            }
-            if let Some(found) = search_match {
-                let galley = &output.galley;
-                let start = galley.from_ccursor(CCursor::new(found.start)).rcursor;
-                let end = galley.from_ccursor(CCursor::new(found.end)).rcursor;
-                let painter = ui.painter().with_clip_rect(output.text_clip_rect);
-                let color = ui.visuals().selection.stroke.color.gamma_multiply(0.75);
-                for index in start.row..=end.row {
-                    let Some(row) = galley.rows.get(index) else {
-                        break;
-                    };
-                    let left = if index == start.row {
-                        row.x_offset(start.column)
-                    } else {
-                        row.rect.left()
-                    };
-                    let right = if index == end.row {
-                        row.x_offset(end.column)
-                    } else {
-                        row.rect.right()
-                    };
-                    if right > left {
-                        let rect = egui::Rect::from_min_max(
-                            egui::pos2(left, row.min_y()),
-                            egui::pos2(right, row.max_y()),
-                        )
-                        .translate(output.galley_pos.to_vec2());
-                        painter.rect_stroke(
-                            rect,
-                            2.0,
-                            egui::Stroke::new(1.0_f32, color),
-                            egui::StrokeKind::Inside,
-                        );
+                if let Some(found) = search_match {
+                    let galley = &output.galley;
+                    let start = galley.from_ccursor(CCursor::new(found.start)).rcursor;
+                    let end = galley.from_ccursor(CCursor::new(found.end)).rcursor;
+                    let painter = ui.painter().with_clip_rect(output.text_clip_rect);
+                    let color = ui.visuals().selection.stroke.color.gamma_multiply(0.75);
+                    for index in start.row..=end.row {
+                        let Some(row) = galley.rows.get(index) else {
+                            break;
+                        };
+                        let left = if index == start.row {
+                            row.x_offset(start.column)
+                        } else {
+                            row.rect.left()
+                        };
+                        let right = if index == end.row {
+                            row.x_offset(end.column)
+                        } else {
+                            row.rect.right()
+                        };
+                        if right > left {
+                            let rect = egui::Rect::from_min_max(
+                                egui::pos2(left, row.min_y()),
+                                egui::pos2(right, row.max_y()),
+                            )
+                            .translate(output.galley_pos.to_vec2());
+                            painter.rect_stroke(
+                                rect,
+                                2.0,
+                                egui::Stroke::new(1.0_f32, color),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
                     }
                 }
-            }
-            let cursor_style = ui.visuals().text_cursor.stroke;
-            let cursor = if config.cursor_trail.enabled_for(Target::Editor)
-                && output.response.has_focus()
-                && let Some(range) = output.cursor_range
-            {
-                let caret = output.galley.pos_from_cursor(&range.primary);
-                let rect = egui::Rect::from_center_size(
-                    caret.center(),
-                    egui::vec2(cursor_style.width.max(1.0), caret.height()),
+                let cursor_style = ui.visuals().text_cursor.stroke;
+                let cursor = if config.cursor_trail.enabled_for(Target::Editor)
+                    && output.response.has_focus()
+                    && let Some(range) = output.cursor_range
+                {
+                    let caret = output.galley.pos_from_cursor(&range.primary);
+                    let rect = egui::Rect::from_center_size(
+                        caret.center(),
+                        egui::vec2(cursor_style.width.max(1.0), caret.height()),
+                    );
+                    let cell_width = ui.fonts(|fonts| fonts.glyph_width(&font, 'M'));
+                    Some(Cursor {
+                        surface: id,
+                        rect,
+                        origin: output.galley_pos.to_vec2(),
+                        cell: egui::vec2(cell_width, caret.height()),
+                        color: cursor_style.color,
+                    })
+                } else {
+                    None
+                };
+                self.trail.draw(
+                    &ui.painter().with_clip_rect(output.text_clip_rect),
+                    &config.cursor_trail,
+                    cursor,
                 );
-                let cell_width = ui.fonts(|fonts| fonts.glyph_width(&font, 'M'));
-                Some(Cursor {
-                    surface: id,
-                    rect,
-                    origin: output.galley_pos.to_vec2(),
-                    cell: egui::vec2(cell_width, caret.height()),
-                    color: cursor_style.color,
-                })
-            } else {
-                None
-            };
-            self.trail.draw(
-                &ui.painter().with_clip_rect(output.text_clip_rect),
-                &config.cursor_trail,
-                cursor,
-            );
-            if let Some(range) = selected {
-                let cursor = output.galley.from_ccursor(CCursor::new(range.end));
-                ui.scroll_to_rect(
-                    output
-                        .galley
-                        .pos_from_cursor(&cursor)
-                        .translate(output.galley_pos.to_vec2()),
-                    Some(Align::Center),
-                );
-            }
-            if gutter > 0.0 {
-                let mut line = 1;
-                let mut start = true;
-                let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(
-                    egui::Rect::from_min_max(
-                        egui::pos2(gutter_right - gutter, ui.clip_rect().top()),
-                        egui::pos2(gutter_right, ui.clip_rect().bottom()),
-                    ),
-                ));
-                for row in &output.galley.rows {
-                    let y = output.galley_pos.y + row.rect.top();
-                    if start
-                        && y + row.rect.height() >= ui.clip_rect().top()
-                        && y <= ui.clip_rect().bottom()
+                if let Some(range) = selected {
+                    let cursor = output.galley.from_ccursor(CCursor::new(range.end));
+                    ui.scroll_to_rect(
+                        output
+                            .galley
+                            .pos_from_cursor(&cursor)
+                            .translate(output.galley_pos.to_vec2()),
+                        Some(Align::Center),
+                    );
+                }
+                if gutter > 0.0 {
+                    let mut line = 1;
+                    let mut start = true;
+                    let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(
+                        egui::Rect::from_min_max(
+                            egui::pos2(gutter_right - gutter, ui.clip_rect().top()),
+                            egui::pos2(gutter_right, ui.clip_rect().bottom()),
+                        ),
+                    ));
+                    let top = ui.clip_rect().top() - output.galley_pos.y;
+                    let bottom = ui.clip_rect().bottom() - output.galley_pos.y;
+                    let rows = &output.galley.rows;
+                    let first = rows.partition_point(|row| row.rect.bottom() < top);
+                    if !wrap_lines {
+                        line = first + 1;
+                    } else {
+                        line += rows[..first]
+                            .iter()
+                            .filter(|row| row.ends_with_newline)
+                            .count();
+                        start = first == 0 || rows[first - 1].ends_with_newline;
+                    }
+                    for row in rows[first..]
+                        .iter()
+                        .take_while(|row| row.rect.top() <= bottom)
                     {
-                        painter.text(
-                            egui::pos2(gutter_right - 10.0, y),
-                            Align2::RIGHT_TOP,
-                            line,
-                            font.clone(),
-                            number_color,
-                        );
+                        let y = output.galley_pos.y + row.rect.top();
+                        if start
+                            && y + row.rect.height() >= ui.clip_rect().top()
+                            && y <= ui.clip_rect().bottom()
+                        {
+                            painter.text(
+                                egui::pos2(gutter_right - 10.0, y),
+                                Align2::RIGHT_TOP,
+                                line,
+                                font.clone(),
+                                number_color,
+                            );
+                        }
+                        start = row.ends_with_newline;
+                        line += usize::from(start);
                     }
-                    start = row.ends_with_newline;
-                    line += usize::from(start);
                 }
-            }
-        });
+                output.response.has_focus()
+            })
+            .inner
     }
 }
 
@@ -292,7 +526,26 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                                             egui::vec2(6.0, config.interface.tab_font_size),
                                             egui::Sense::hover(),
                                         );
-                                        ui.painter().circle_filled(dot.center(), 2.5, foreground);
+                                        ui.painter().circle_filled(
+                                            dot.center(),
+                                            2.5,
+                                            palette.accent,
+                                        );
+                                    }
+                                    if config.interface.show_file_icons {
+                                        let ext = document
+                                            .path
+                                            .as_deref()
+                                            .and_then(std::path::Path::extension)
+                                            .and_then(std::ffi::OsStr::to_str);
+                                        let icon = match ext {
+                                            Some("rs" | "js" | "ts" | "c" | "cpp" | "py") => "<>",
+                                            Some("toml" | "json" | "yaml" | "yml") => "{}",
+                                            _ => "≡",
+                                        };
+                                        ui.label(
+                                            RichText::new(icon).color(palette.tab_text_inactive),
+                                        );
                                     }
                                     ui.label(
                                         RichText::new(truncate_tab_name(
@@ -347,7 +600,7 @@ fn truncate_tab_name(name: &str, max_chars: usize) -> String {
 }
 
 pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
-    let height = 26.0
+    let height = config.interface.status_bar_height
         * config.animations.status_bar.progress(
             ctx,
             "status animation",
@@ -362,7 +615,7 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
         .exact_height(height)
         .show(ctx, |ui| {
             let mut area = ui.max_rect().shrink2(egui::vec2(12.0, 0.0));
-            area.max.y = area.min.y + 26.0;
+            area.max.y = area.min.y + config.interface.status_bar_height;
             let mut bar = ui.new_child(
                 UiBuilder::new()
                     .max_rect(area)
@@ -377,15 +630,23 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
             let (line, column) = document.position();
             let lines = document.line_count();
             let encoding = document.encoding();
+            let ending = document.ending.label();
             let unit = if lines == 1 { "line" } else { "lines" };
             bar.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
-                    RichText::new(format!("{encoding}  |  {lines} {unit}  |  {line}:{column}"))
-                        .size(12.0),
+                    RichText::new(format!(
+                        "{encoding}  |  {ending}  |  {lines} {unit}  |  {line}:{column}"
+                    ))
+                    .size(config.interface.status_bar_font_size),
                 );
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.add(egui::Label::new(RichText::new(label).size(12.0)).truncate())
-                        .on_hover_text(document.display_path());
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(label).size(config.interface.status_bar_font_size),
+                        )
+                        .truncate(),
+                    )
+                    .on_hover_text(document.display_path());
                 });
             });
         });
@@ -510,11 +771,24 @@ impl SyntaxLayouts {
             .zip(text.bytes())
             .take_while(|(previous, current)| previous == current)
             .count();
-        cached.checkpoints.truncate(
-            cached
-                .checkpoints
-                .partition_point(|checkpoint| checkpoint.byte <= prefix),
-        );
+        let old_len = cached.job.text.len();
+        let suffix = cached.job.text.as_bytes()[prefix..]
+            .iter()
+            .rev()
+            .zip(text.as_bytes()[prefix..].iter().rev())
+            .take_while(|(old, new)| old == new)
+            .count();
+        let prefix_points = cached
+            .checkpoints
+            .partition_point(|point| point.byte <= prefix);
+        let old_points = cached.checkpoints.split_off(prefix_points);
+        let old_section_start = cached.checkpoints.last().map_or(0, |point| point.sections);
+        let old_sections = cached.job.sections.split_off(old_section_start);
+        let shift = text.len() as isize - old_len as isize;
+        let mut suffix_points = old_points
+            .into_iter()
+            .filter(|point| point.byte >= old_len - suffix)
+            .peekable();
         let (offset, mut highlighter) = if let Some(checkpoint) = cached.checkpoints.last() {
             cached.job.text.truncate(checkpoint.byte);
             cached.job.sections.truncate(checkpoint.sections);
@@ -530,16 +804,56 @@ impl SyntaxLayouts {
             cached.job = LayoutJob::default();
             (0, HighlightLines::new(syntax, theme))
         };
+        let mut old_sections = old_sections.into_iter();
         for (index, line) in LinesWithEndings::from(&text[offset..]).enumerate() {
-            if index > 0 && index % HIGHLIGHT_CHECKPOINT_LINES == 0 {
+            let byte = cached.job.text.len();
+            while suffix_points
+                .peek()
+                .is_some_and(|point| point.byte.saturating_add_signed(shift) < byte)
+            {
+                suffix_points.next();
+            }
+            let candidate = suffix_points
+                .peek()
+                .filter(|point| point.byte.saturating_add_signed(shift) == byte);
+            if (index > 0 && index % HIGHLIGHT_CHECKPOINT_LINES == 0) || candidate.is_some() {
                 let (highlight, parse) = highlighter.state();
+                if let Some(old) = candidate
+                    && old.highlight == highlight
+                    && old.parse == parse
+                {
+                    let section_shift = cached.job.sections.len() as isize - old.sections as isize;
+                    let skip = old.sections - old_section_start;
+                    cached.job.text.push_str(&text[byte..]);
+                    cached
+                        .job
+                        .sections
+                        .extend(old_sections.by_ref().skip(skip).map(|mut section| {
+                            section.byte_range =
+                                section.byte_range.start.saturating_add_signed(shift)
+                                    ..section.byte_range.end.saturating_add_signed(shift);
+                            section
+                        }));
+                    cached.checkpoints.extend(suffix_points.map(|mut point| {
+                        point.byte = point.byte.saturating_add_signed(shift);
+                        point.sections = point.sections.saturating_add_signed(section_shift);
+                        point
+                    }));
+                    break;
+                }
                 highlighter = HighlightLines::from_state(theme, highlight.clone(), parse.clone());
-                cached.checkpoints.push(HighlightCheckpoint {
-                    byte: cached.job.text.len(),
-                    sections: cached.job.sections.len(),
-                    highlight,
-                    parse,
-                });
+                if cached
+                    .checkpoints
+                    .last()
+                    .is_none_or(|point| point.byte < byte)
+                {
+                    cached.checkpoints.push(HighlightCheckpoint {
+                        byte,
+                        sections: cached.job.sections.len(),
+                        highlight,
+                        parse,
+                    });
+                }
             }
             let Ok(segments) = highlighter.highlight_line(line, &self.syntaxes) else {
                 self.cached.remove(&id);
@@ -640,7 +954,7 @@ impl SearchBar {
         self.next_requested = true;
     }
 
-    pub fn show(&mut self, ui: &mut Ui, document: &mut Document) {
+    pub fn show(&mut self, ui: &mut Ui, document: &mut Document, pane: u64) {
         if !self.open {
             return;
         }
@@ -683,7 +997,7 @@ impl SearchBar {
             ui.toggle_value(&mut self.show_replacement, "Replace…");
             if ui.button("×").on_hover_text("Close search").clicked() {
                 self.close();
-                ui.memory_mut(|memory| memory.request_focus(Editor::id(document)));
+                ui.memory_mut(|memory| memory.request_focus(Editor::id(document, pane)));
             }
         });
         if self.show_replacement {
@@ -704,7 +1018,7 @@ impl SearchBar {
         ui.separator();
 
         if (replace || replace_all) && self.replacement != self.query {
-            let id = Editor::id(document);
+            let id = Editor::id(document, pane);
             let mut state = TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
             let before = CCursorRange::one(CCursor::new(document.cursor));
             let mut undoer = state.undoer();
@@ -747,6 +1061,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn editor_insertions_and_deletions_preserve_indentation_and_crlf() {
+        use egui::TextBuffer;
+        let mut docs = Documents::default();
+        let doc = docs.current_mut();
+        doc.text = "  猫".into();
+        doc.set_ending(LineEnding::Crlf).unwrap();
+        let config = crate::config::Editor {
+            tab_size: 3,
+            insert_spaces: true,
+            auto_indent: true,
+            ..Default::default()
+        };
+        let mut buffer = EditBuffer {
+            document: doc,
+            config: &config,
+        };
+        assert_eq!(buffer.insert_text("\n", 3), 4);
+        assert_eq!(buffer.as_str(), "  猫\r\n  ");
+        assert_eq!(buffer.insert_text("\t", 7), 1);
+        assert_eq!(buffer.as_str(), "  猫\r\n   ");
+        let cursor = buffer.delete_previous_char(CCursor::new(5));
+        assert_eq!(cursor.index, 3);
+        assert_eq!(buffer.as_str(), "  猫   ");
+    }
+
+    #[test]
     #[ignore = "manual large-document timing"]
     fn large_document_edit_latency() {
         use std::{hint::black_box, time::Instant};
@@ -766,14 +1106,12 @@ mod tests {
                 if search_open {
                     bar.refresh_after_edit(doc);
                 }
-                let byte = if at_end { source.len() } else { 0 };
                 let cursor = if at_end { source.chars().count() } else { 0 };
                 let mut times = Vec::new();
                 for sample in 0..35 {
                     let start = Instant::now();
-                    doc.text.insert(byte, 'x');
+                    doc.replace_chars(cursor..cursor, "x");
                     doc.cursor = cursor + 1;
-                    doc.text_changed();
                     let indexed = start.elapsed();
                     if search_open {
                         bar.refresh_after_edit(doc);
@@ -784,9 +1122,8 @@ mod tests {
                     if sample >= 4 {
                         times.push((elapsed, indexed));
                     }
-                    doc.text.remove(byte);
+                    doc.replace_chars(cursor..cursor + 1, "");
                     doc.cursor = cursor;
-                    doc.text_changed();
                     if search_open {
                         bar.refresh_after_edit(doc);
                     }
