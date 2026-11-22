@@ -14,12 +14,12 @@ use std::{
     collections::HashMap,
     env, io,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{ExitCode, Stdio},
     sync::mpsc,
 };
 
 use command::{Command, Reply, Request, Zoom};
-use config::{Bindings, Config, FileWatch, Side};
+use config::{Bindings, Config, FileWatch, ShortcutAction, Side};
 use document::{DiskChange, Documents};
 use editor::{Editor, SearchBar};
 use eframe::egui::{self, FontId};
@@ -52,6 +52,7 @@ struct Synth {
     watcher: Option<FileWatch>,
     watched_document: Option<WatchedDocument>,
     commands: mpsc::Receiver<Request>,
+    shell_errors: (mpsc::Sender<String>, mpsc::Receiver<String>),
     documents: Documents,
     editor: Editor,
     search_bar: SearchBar,
@@ -117,6 +118,7 @@ impl Synth {
             watcher,
             watched_document: None,
             commands,
+            shell_errors: mpsc::channel(),
             documents: Documents::default(),
             editor: Editor::default(),
             search_bar: SearchBar::default(),
@@ -526,12 +528,15 @@ impl Synth {
         Ok(reply)
     }
 
-    fn shortcut_commands(&self, ctx: &egui::Context) -> Vec<Command> {
+    fn shortcut_commands(&self, ctx: &egui::Context) -> Vec<ShortcutAction> {
         let terminal_focused = self.focus(ctx) == Focus::Terminal;
         let search_open = self.search_bar.is_open();
         let query_focused = ctx.memory(|memory| memory.has_focus(SearchBar::query_id()));
         let dialog_open = self.confirmation.is_some();
-        let available = |command: &Command| {
+        let available = |action: &ShortcutAction| {
+            let ShortcutAction::Synth(command) = action else {
+                return !dialog_open;
+            };
             if dialog_open {
                 return matches!(command, Command::CancelDialog | Command::InterfaceZoom(_));
             }
@@ -577,6 +582,29 @@ impl Synth {
             });
             commands
         })
+    }
+
+    fn run_shell_shortcut(&self, ctx: &egui::Context, script: String) -> Reply {
+        let directory = self
+            .documents
+            .current()
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_owned);
+        let sender = self.shell_errors.0.clone();
+        let ctx = ctx.clone();
+        std::thread::Builder::new()
+            .name("synth-shell-shortcut".into())
+            .spawn(move || {
+                let result = run_shortcut_shell(&script, directory.as_deref());
+                if let Err(error) = result {
+                    let _ = sender.send(format!("Shortcut command: {error}"));
+                    ctx.request_repaint();
+                }
+            })
+            .map_err(|error| io_message(&error))?;
+        Ok(String::new())
     }
 
     fn terminal_font_size(&self) -> f32 {
@@ -691,8 +719,15 @@ impl eframe::App for Synth {
             let reply = self.execute(ctx, request.command);
             let _ = request.respond.send(reply);
         }
-        for command in self.shortcut_commands(ctx) {
-            if let Err(error) = self.execute(ctx, command) {
+        for error in self.shell_errors.1.try_iter() {
+            self.notice = Some(error);
+        }
+        for action in self.shortcut_commands(ctx) {
+            let result = match action {
+                ShortcutAction::Synth(command) => self.execute(ctx, command),
+                ShortcutAction::Shell(script) => self.run_shell_shortcut(ctx, script),
+            };
+            if let Err(error) = result {
                 self.notice = Some(error);
             }
         }
@@ -829,6 +864,43 @@ impl eframe::App for Synth {
     }
 }
 
+fn run_shortcut_shell(script: &str, directory: Option<&Path>) -> Result<(), String> {
+    #[cfg(unix)]
+    let mut shell = {
+        let mut shell = std::process::Command::new("/bin/sh");
+        shell.args(["-c", script]);
+        shell
+    };
+    #[cfg(windows)]
+    let mut shell = {
+        use std::os::windows::process::CommandExt;
+
+        let executable = env::var_os("SystemRoot")
+            .map(|root| PathBuf::from(root).join("System32/cmd.exe"))
+            .unwrap_or_else(|| PathBuf::from("cmd.exe"));
+        let mut shell = std::process::Command::new(executable);
+        shell
+            .args(["/D", "/S", "/C"])
+            .raw_arg(format!("\"{script}\""))
+            .creation_flags(0x08000000);
+        shell
+    };
+    if let Some(directory) = directory {
+        shell.current_dir(directory);
+    }
+    let status = shell
+        .env(command::WINDOW_ENV, std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| io_message(&error))?;
+    if !status.success() {
+        return Err(status.to_string());
+    }
+    Ok(())
+}
+
 fn check_config(path: &Path) -> Reply {
     if !path.try_exists().map_err(|error| io_message(&error))? {
         return Err(format!(
@@ -929,5 +1001,23 @@ fn main() -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_shortcuts_use_shell_syntax_and_the_document_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        let script = "printf '%s' 'hello world' | cat > shortcut.txt";
+        #[cfg(windows)]
+        let script = "echo hello world>shortcut.txt";
+        run_shortcut_shell(script, Some(dir.path())).unwrap();
+        let output = std::fs::read_to_string(dir.path().join("shortcut.txt")).unwrap();
+        assert_eq!(output.trim_end(), "hello world");
+        assert!(run_shortcut_shell("exit 7", Some(dir.path())).is_err());
     }
 }

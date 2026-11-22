@@ -30,7 +30,12 @@ args = [] # arguments for a custom shell
 # toggle_key = "Esc" # legacy shortcut, used when [keybinds] is absent
 # animation_ms = 180 # legacy duration, used when [animations.terminal] is absent
 
-# Run synth help for every command available to bind.
+# Run synth help for built-in commands. Other strings run in /bin/sh or Windows cmd.exe.
+# Commands run in the active file's directory, or Synth's startup directory for untitled files.
+# Shell commands run in the background. Redirect output to a file to see it.
+# Use shell: to run a pipeline or script that starts with synth.
+# Example for Linux: "Ctrl+F8" = "printf '%s\\n' hello > shortcut.log"
+# Example for Windows: "Ctrl+F8" = "echo hello > shortcut.log"
 [keybinds]
 "Ctrl+F" = "synth search toggle"
 # For a list, the first action available in the current view wins.

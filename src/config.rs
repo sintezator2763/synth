@@ -18,7 +18,13 @@ use crate::{
 
 pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 8.0..=48.0;
 
-pub type Bindings = Vec<(egui::KeyboardShortcut, Command)>;
+pub type Bindings = Vec<(egui::KeyboardShortcut, ShortcutAction)>;
+
+#[derive(Clone)]
+pub enum ShortcutAction {
+    Synth(Command),
+    Shell(String),
+}
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -672,10 +678,10 @@ impl Config {
             return Ok(if bare_escape(shortcut) {
                 legacy_escape_commands()
                     .into_iter()
-                    .map(|command| (shortcut, command))
+                    .map(|command| (shortcut, ShortcutAction::Synth(command)))
                     .collect()
             } else {
-                vec![(shortcut, Command::ToggleTerminal)]
+                vec![(shortcut, ShortcutAction::Synth(Command::ToggleTerminal))]
             });
         };
         let directory = path.parent().ok_or("File has no parent directory")?;
@@ -686,16 +692,25 @@ impl Config {
                 return Err(format!("Duplicate shortcut: {key}"));
             }
             if binding.commands().is_empty() {
-                return Err(format!("{key}: Expected at least one synth command"));
+                return Err(format!("{key}: Expected at least one command"));
             }
             for text in binding.commands() {
-                let words = shell_words::split(text).map_err(|error| format!("{key}: {error}"))?;
-                let (program, args) = words
-                    .split_first()
-                    .ok_or_else(|| format!("{key}: Expected synth command"))?;
-                if program != "synth" {
-                    return Err(format!("{key}: Expected synth command"));
+                let text = text.trim();
+                let words = shell_words::split(text);
+                let internal = match &words {
+                    Ok(words) => words.first().is_some_and(|program| program == "synth"),
+                    Err(_) => text.split_whitespace().next() == Some("synth"),
+                };
+                if !internal {
+                    let script = text.strip_prefix("shell:").unwrap_or(text).trim();
+                    if script.is_empty() || script.contains('\0') {
+                        return Err(format!("{key}: Expected a nonempty shell command"));
+                    }
+                    bindings.push((shortcut, ShortcutAction::Shell(script.to_owned())));
+                    continue;
                 }
+                let words = words.map_err(|error| format!("{key}: {error}"))?;
+                let args = &words[1..];
                 let args = args.iter().map(Into::into).collect::<Vec<_>>();
                 let command =
                     Command::parse(&args, directory).map_err(|error| format!("{key}: {error}"))?;
@@ -706,10 +721,10 @@ impl Config {
                     bindings.extend(
                         legacy_escape_commands()
                             .into_iter()
-                            .map(|command| (shortcut, command)),
+                            .map(|command| (shortcut, ShortcutAction::Synth(command))),
                     );
                 } else {
-                    bindings.push((shortcut, command));
+                    bindings.push((shortcut, ShortcutAction::Synth(command)));
                 }
             }
         }
@@ -775,7 +790,9 @@ impl Config {
         if config.terminal.shell.is_none() && !config.terminal.args.is_empty() {
             return Err("terminal.args requires terminal.shell".into());
         }
-        config.terminal.shortcut()?;
+        if config.keybinds.is_none() && config.keybindings.is_none() {
+            config.terminal.shortcut()?;
+        }
         config.cursor_trail.validate()?;
         Ok(config)
     }
@@ -843,10 +860,13 @@ mod tests {
         let bindings = config.bindings(Path::new("/tmp/config.toml")).unwrap();
         assert!(bindings.iter().any(|(shortcut, command)| *shortcut
             == egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Escape)
-            && matches!(command, Command::ToggleEditorTerminal)));
+            && matches!(
+                command,
+                ShortcutAction::Synth(Command::ToggleEditorTerminal)
+            )));
         assert!(bindings.iter().any(|(shortcut, command)| *shortcut
             == egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Escape)
-            && matches!(command, Command::HideTerminal)));
+            && matches!(command, ShortcutAction::Synth(Command::HideTerminal))));
     }
 
     #[test]
@@ -889,7 +909,45 @@ mod tests {
             bindings[0].0,
             egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::F)
         );
-        assert!(matches!(bindings[0].1, Command::ToggleSearch));
+        assert!(matches!(
+            bindings[0].1,
+            ShortcutAction::Synth(Command::ToggleSearch)
+        ));
+    }
+
+    #[test]
+    fn external_keybinds_preserve_shell_syntax() {
+        let settings = Config::parse(
+            r#"
+[keybinds]
+F7 = ['synth search next', "printf '%s' 'hello world' > out.txt"]
+F8 = 'shell: synth properties | cat'
+"#,
+        )
+        .unwrap();
+        let bindings = settings.bindings(Path::new("config.toml")).unwrap();
+        assert!(matches!(
+            bindings[0].1,
+            ShortcutAction::Synth(Command::SearchNext)
+        ));
+        assert!(
+            matches!(&bindings[1].1, ShortcutAction::Shell(script) if script == "printf '%s' 'hello world' > out.txt")
+        );
+        assert!(
+            matches!(&bindings[2].1, ShortcutAction::Shell(script) if script == "synth properties | cat")
+        );
+        assert!(
+            Config::parse("[keybinds]\nF7='shell:'")
+                .unwrap()
+                .bindings(Path::new("config.toml"))
+                .is_err()
+        );
+        assert!(
+            Config::parse("[keybinds]\nF7='synth typo'")
+                .unwrap()
+                .bindings(Path::new("config.toml"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -903,9 +961,9 @@ mod tests {
         assert!(matches!(
             &commands[..],
             [
-                Command::CancelDialog,
-                Command::CloseSearch,
-                Command::ToggleEditorTerminal
+                ShortcutAction::Synth(Command::CancelDialog),
+                ShortcutAction::Synth(Command::CloseSearch),
+                ShortcutAction::Synth(Command::ToggleEditorTerminal)
             ]
         ));
         assert!(
@@ -920,6 +978,13 @@ mod tests {
                 .bindings(path)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn inactive_legacy_shortcut_does_not_break_keybinds() {
+        let source = "[terminal]\ntoggle_key='UnknownKey'\n[keybinds]\nF7='synth new'";
+        let config = Config::parse(source).unwrap();
+        assert_eq!(config.bindings(Path::new("config.toml")).unwrap().len(), 1);
     }
 
     #[test]

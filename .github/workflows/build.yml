@@ -11,6 +11,21 @@ permissions:
   contents: read
 
 jobs:
+  cleanup:
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Delete older build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/prune-artifacts.py --apply
+
   version:
     runs-on: ubuntu-24.04
     outputs:
@@ -42,7 +57,8 @@ jobs:
               print(f"number={version}", file=output)
 
   build:
-    needs: version
+    needs: [version, cleanup]
+    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.cleanup.result == 'success' || needs.cleanup.result == 'skipped') }}
     strategy:
       fail-fast: false
       matrix:
@@ -168,6 +184,7 @@ jobs:
           name: Synth-${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
+          retention-days: 3
 
   release:
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
