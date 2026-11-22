@@ -306,14 +306,16 @@ impl Synth {
                 return Err("Enter a file path for each untitled document.".into());
             }
         }
-        let directory = env::current_dir().map_err(|error| io_message(&error))?;
         for document in self
             .documents
             .items
             .iter_mut()
             .filter(|document| document.dirty())
         {
-            let destination = paths.get(&document.id).map(|path| directory.join(path));
+            let destination = paths.get(&document.id)
+                .map(std::path::absolute)
+                .transpose()
+                .map_err(|error| io_message(&error))?;
             document.save(destination.as_deref())?;
         }
         Ok(())

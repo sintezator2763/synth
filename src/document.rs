@@ -44,7 +44,7 @@ impl Document {
 
     pub fn name(&self) -> String {
         self.path.as_deref().and_then(Path::file_name).map_or_else(
-            || "Untitled".into(),
+            || format!("Untitled {}", self.id + 1),
             |name| name.to_string_lossy().into_owned(),
         )
     }
@@ -100,10 +100,14 @@ impl Document {
         Ok(format!("Cursor at {line}:{column}"))
     }
 
+    pub fn encoding(&self) -> &'static str {
+        if self.bom { "UTF-8 with BOM" } else { "UTF-8" }
+    }
+
     fn properties(&self) -> String {
         let (line, column) = self.position();
         let lines = self.line_count();
-        let encoding = if self.bom { "UTF-8 with BOM" } else { "UTF-8" };
+        let encoding = self.encoding();
         let modified = if self.dirty() { "yes" } else { "no" };
         format!(
             "{}\nModified: {modified}\nEncoding: {encoding}\nLines: {lines}\nCursor: {line}:{column}",

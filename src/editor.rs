@@ -54,7 +54,13 @@ impl Editor {
             config.interface.enable_line_numbers,
             config.animations.enabled,
         );
-        let gutter = show_numbers * (font.size * 3.4);
+        let gutter = if show_numbers > 0.0 {
+            let digits = document.line_count().ilog10() + 1;
+            let digit_width = ui.fonts(|fonts| fonts.glyph_width(&font, '0'));
+            show_numbers * (digits as f32 * digit_width + 16.0)
+        } else {
+            0.0
+        };
         let number_color = ui
             .visuals()
             .weak_text_color()
@@ -240,10 +246,14 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                                     );
                                 });
                             });
-                        let tooltip = document.path.as_ref().map_or_else(
-                            || document.name(),
-                            |path| path.display().to_string(),
-                        );
+                        if active {
+                            let key = ui.id().with("visible active tab");
+                            let previous = ui.data_mut(|data| data.get_temp::<u64>(key));
+                            if previous != Some(document.id) {
+                                tab.response.scroll_to_me(None);
+                                ui.data_mut(|data| data.insert_temp(key, document.id));
+                            }
+                        }
                         if ui
                             .interact(
                                 tab.response.rect,
@@ -251,7 +261,7 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                                 egui::Sense::click(),
                             )
                             .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .on_hover_text(tooltip)
+                            .on_hover_text(document.display_path())
                             .clicked()
                         {
                             action = Some(index);
@@ -303,9 +313,14 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
             };
             let (line, column) = document.position();
             let lines = document.line_count();
-            bar.label(RichText::new(label).monospace());
+            let encoding = document.encoding();
+            let unit = if lines == 1 { "line" } else { "lines" };
             bar.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(format!("UTF-8  |  {lines} lines  |  {line}:{column}")).monospace());
+                ui.label(RichText::new(format!("{encoding}  |  {lines} {unit}  |  {line}:{column}")).monospace());
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(label).monospace()).truncate())
+                        .on_hover_text(document.display_path());
+                });
             });
         });
 }
