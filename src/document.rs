@@ -1,10 +1,13 @@
 use std::{
+    ffi::OsString,
     fs,
     hash::{DefaultHasher, Hash, Hasher},
     io::{self, Write},
     ops::Range,
     path::{Path, PathBuf},
 };
+
+use serde::{Deserialize, Serialize};
 
 use crate::command::Reply;
 
@@ -14,8 +17,29 @@ pub enum DiskChange {
     Unavailable,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Draft {
+    path: Option<OsString>,
+    text: String,
+    saved: String,
+    bom: bool,
+    cursor: usize,
+}
+
+impl Draft {
+    pub fn label(&self) -> String {
+        self.path.as_ref().map_or_else(|| {
+            let preview: String = self.text.lines().map(str::trim).find(|line| !line.is_empty())
+                .unwrap_or("").chars().take(60).collect();
+            format!("Untitled — {preview}")
+        }, |path| Path::new(path).display().to_string())
+    }
+}
+
 pub struct Document {
     pub id: u64,
+    pub revision: u64,
+    pub wrap_lines: Option<bool>,
     pub path: Option<PathBuf>,
     pub text: String,
     pub cursor: usize,
@@ -26,6 +50,7 @@ pub struct Document {
     bom: bool,
     search: Option<(String, usize)>,
     line_starts: Vec<usize>,
+    line_ends: Vec<usize>,
     char_count: usize,
 }
 
@@ -33,6 +58,8 @@ impl Document {
     fn empty(id: u64) -> Self {
         Self {
             id,
+            revision: 0,
+            wrap_lines: None,
             path: None,
             text: String::new(),
             cursor: 0,
@@ -43,7 +70,18 @@ impl Document {
             bom: false,
             search: None,
             line_starts: vec![0],
+            line_ends: vec![0],
             char_count: 0,
+        }
+    }
+
+    pub fn draft(&self) -> Draft {
+        Draft {
+            path: self.path.as_ref().map(|path| path.as_os_str().to_owned()),
+            text: self.text.clone(),
+            saved: self.saved.clone(),
+            bom: self.bom,
+            cursor: self.cursor,
         }
     }
 
@@ -65,16 +103,22 @@ impl Document {
     }
 
     pub fn text_changed(&mut self) {
+        self.revision += 1;
         self.dirty = self.text != self.saved;
         self.line_starts.clear();
         self.line_starts.push(0);
+        self.line_ends.clear();
+        let mut carriage_return = false;
         self.char_count = 0;
         for character in self.text.chars() {
             self.char_count += 1;
             if character == '\n' {
+                self.line_ends.push(self.char_count - 1 - usize::from(carriage_return));
                 self.line_starts.push(self.char_count);
             }
+            carriage_return = character == '\r';
         }
+        self.line_ends.push(self.char_count);
     }
 
     pub fn line_count(&self) -> usize {
@@ -100,10 +144,7 @@ impl Document {
             .line_starts
             .get(line.wrapping_sub(1))
             .ok_or_else(|| format!("Line {line} is outside this document"))?;
-        let end = self
-            .line_starts
-            .get(line)
-            .map_or(self.char_count, |next| next - 1);
+        let end = self.line_ends[line - 1];
         self.move_cursor(start + column.saturating_sub(1).min(end - start));
         let (_, column) = self.position();
         Ok(format!("Cursor at {line}:{column}"))
@@ -305,6 +346,27 @@ impl Documents {
         Ok(format!("Opened {}", path.display()))
     }
 
+    pub fn restore_draft(&mut self, draft: Draft) {
+        let mut document = Document::empty(self.next_id);
+        self.next_id += 1;
+        document.path = draft.path.map(PathBuf::from);
+        document.text = draft.text;
+        document.saved = draft.saved;
+        document.bom = draft.bom;
+        document.text_changed();
+        document.move_cursor(draft.cursor.min(document.char_count));
+        if let Some(index) = self.items.iter().position(|open| {
+            !open.dirty()
+                && (open.id == 0 || (document.path.is_some() && open.path == document.path))
+        }) {
+            self.items[index] = document;
+            self.active = index;
+        } else {
+            self.items.push(document);
+            self.active = self.items.len() - 1;
+        }
+    }
+
     pub fn reload(&mut self, id: u64) -> Reply {
         let document = self
             .items
@@ -386,6 +448,22 @@ impl Documents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn goto_clamps_before_crlf_when_inserting_and_saving() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("example.txt");
+        fs::write(&path, "猫bc\r\nnext").unwrap();
+        let mut docs = Documents::default();
+        docs.open(&path).unwrap();
+        let doc = docs.current_mut();
+        assert_eq!(doc.goto(1, 999).unwrap(), "Cursor at 1:4");
+        let byte = doc.text.char_indices().nth(doc.cursor).unwrap().0;
+        doc.text.insert(byte, 'x');
+        doc.text_changed();
+        docs.save(None).unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "猫bcx\r\nnext");
+    }
 
     #[test]
     fn disk_changes_compare_against_saved_content_with_bom() {

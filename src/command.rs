@@ -53,7 +53,15 @@ pub enum Command {
     PreviousTab,
     Find(String),
     FindNext,
+    ToggleSearch,
+    CloseSearch,
+    SearchNext,
+    CancelDialog,
+    ToggleWrap,
     ToggleTerminal,
+    ToggleEditorTerminal,
+    CopyTerminalSelection,
+    HideTerminal,
     TerminalImage(OsString),
     ToggleFocus,
     ConfigPath,
@@ -74,6 +82,7 @@ pub fn help() -> String {
             ("saveas PATH", "Save the active document to PATH"),
             ("reload", "Reload the active document from disk"),
             ("goto LINE[:COLUMN]", "Move the cursor to a line and column"),
+            ("wrap toggle", "Toggle line wrapping in the active document"),
             ("close", "Close an unchanged document"),
             ("close --discard", "Close without saving changes"),
             ("properties", "Show file information"),
@@ -87,9 +96,15 @@ pub fn help() -> String {
             ("find TEXT", "Find the first occurrence"),
             ("find next", "Find the next occurrence"),
             ("find -- next", "Find the literal word \"next\""),
+            ("search toggle", "Show or hide the search and replace bar"),
+            ("search close", "Close the search and replace bar"),
+            ("search next", "Go to the next match in the search bar"),
         ]),
         ("TERMINAL", &[
             ("terminal toggle", "Show or hide the terminal"),
+            ("terminal toggle-edit", "Toggle the terminal from the editor"),
+            ("terminal copy", "Copy the terminal selection"),
+            ("terminal hide", "Hide the terminal panel"),
             ("terminal image PATH", "Display a PNG or JPEG in the terminal"),
             ("focus toggle", "Switch focus between editor and terminal"),
         ]),
@@ -99,6 +114,7 @@ pub fn help() -> String {
             ("config reload", "Reload configuration from disk"),
         ]),
         ("GENERAL", &[
+            ("dialog cancel", "Dismiss the current confirmation dialog"),
             ("help", "Display this help"),
             ("-h, --help", "Display this help"),
         ]),
@@ -113,7 +129,7 @@ pub fn help() -> String {
         output.push('\n');
     }
     output.push_str(
-        "Shortcuts are configured in config.toml.\nUse 'synth PATH' or 'synth open PATH' to open a file, starting Synth if needed. Most other commands require a running window.\n",
+        "Configure shortcuts in [keybinds] in config.toml.\nUse 'synth PATH' or 'synth open PATH' to open a file, starting Synth if needed. Most other commands require a running window.\n",
     );
     output
 }
@@ -142,10 +158,18 @@ impl Command {
             (2, "tab", "list") => Ok(Self::Tabs),
             (2, "tab", "next") => Ok(Self::NextTab),
             (2, "tab", "prev") => Ok(Self::PreviousTab),
+            (2, "search", "toggle") => Ok(Self::ToggleSearch),
+            (2, "search", "close") => Ok(Self::CloseSearch),
+            (2, "search", "next") => Ok(Self::SearchNext),
+            (2, "dialog", "cancel") => Ok(Self::CancelDialog),
+            (2, "wrap", "toggle") => Ok(Self::ToggleWrap),
             (2, "find", "next") => Ok(Self::FindNext),
             (2, "find", text) if !text.is_empty() => Ok(Self::Find(text.into())),
             (3, "find", "--") if !word(2).is_empty() => Ok(Self::Find(word(2).into())),
             (2, "terminal", "toggle") => Ok(Self::ToggleTerminal),
+            (2, "terminal", "toggle-edit") => Ok(Self::ToggleEditorTerminal),
+            (2, "terminal", "copy") => Ok(Self::CopyTerminalSelection),
+            (2, "terminal", "hide") => Ok(Self::HideTerminal),
             (3.., "terminal", "image") => {
                 path_argument(directory, &args[2..]).map(Self::TerminalImage)
             }
@@ -260,24 +284,22 @@ pub fn dispatch_if_running(
         Err(_) => return Err("Invalid SYNTH_WINDOW_PID".into()),
     };
     let name = socket_name(installation, window).map_err(|error| crate::io_message(&error))?;
-    let mut stream = match Stream::connect(name) {
-        Ok(stream) => stream,
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return match window {
-                Some(pid) => Err(format!("Could not connect to Synth window {pid}")),
-                None => Ok(None),
-            };
-        }
-        Err(error) => {
-            return Err(format!(
-                "Could not connect to the running Synth: {}",
-                crate::io_message(&error)
-            ));
+    let mut retry = window.is_none();
+    let mut stream = loop {
+        match Stream::connect(name.clone()) {
+            Ok(stream) => break stream,
+            Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {
+                if retry {
+                    retry = false;
+                    std::thread::sleep(SHARED_RETRY * 2);
+                    continue;
+                }
+                return match window {
+                    Some(pid) => Err(format!("Could not connect to Synth window {pid}")),
+                    None => Ok(None),
+                };
+            }
+            Err(error) => return Err(format!("Could not connect to the running Synth: {}", crate::io_message(&error))),
         }
     };
     exchange(&mut stream, command)
@@ -292,16 +314,36 @@ fn exchange(stream: &mut Stream, command: &Command) -> io::Result<Reply> {
     read_frame(stream, COMMAND_TIMEOUT + Duration::from_secs(1))
 }
 
+const SHARED_RETRY: Duration = Duration::from_millis(150);
+
 pub fn listen(installation: &Path, ctx: &egui::Context) -> mpsc::Receiver<Request> {
     let (sender, receiver) = mpsc::channel();
     for window in [NonZeroU32::new(std::process::id()), None] {
-        if let Err(error) = listen_at(installation, window, ctx.clone(), sender.clone())
-            && (window.is_some() || error.kind() != io::ErrorKind::AddrInUse)
-        {
-            eprintln!("Synth command listener: {}", crate::io_message(&error));
+        match listen_at(installation, window, ctx.clone(), sender.clone()) {
+            Ok(()) => {}
+            Err(error) if window.is_none() && address_taken(&error) => {
+                let installation = installation.to_owned();
+                let ctx = ctx.clone();
+                let sender = sender.clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(SHARED_RETRY);
+                    match listen_at(&installation, None, ctx.clone(), sender.clone()) {
+                        Err(error) if address_taken(&error) => continue,
+                        Err(error) => eprintln!("Synth command listener: {}", crate::io_message(&error)),
+                        Ok(()) => {}
+                    }
+                    break;
+                });
+            }
+            Err(error) => eprintln!("Synth command listener: {}", crate::io_message(&error)),
         }
     }
     receiver
+}
+
+fn address_taken(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::AddrInUse
+        || (cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied)
 }
 
 fn listen_at(
@@ -493,7 +535,7 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("  "))
             .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 23);
+        assert_eq!(rows.len(), 31);
         for row in rows {
             assert_eq!(&row[24..26], "  ");
         }

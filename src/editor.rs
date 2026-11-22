@@ -36,7 +36,13 @@ impl Editor {
         }
     }
 
-    pub fn show(&mut self, ui: &mut Ui, document: &mut Document, config: &Config) {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        document: &mut Document,
+        config: &Config,
+        search_match: Option<&std::ops::Range<usize>>,
+    ) {
         let font = FontId::monospace(config.editor.font_size);
         let id = Self::id(document);
         let selected = document.selection.take();
@@ -66,9 +72,15 @@ impl Editor {
             .weak_text_color()
             .gamma_multiply(show_numbers.min(1.0));
         let foreground = ui.visuals().text_color();
+        let wrap_lines = document.wrap_lines.unwrap_or(config.editor.wrap_lines);
         let document_id = document.id;
         let path = document.path.clone();
         let mut layout = |ui: &Ui, text: &str, wrap_width: f32| {
+            let wrap_width = if wrap_lines {
+                wrap_width
+            } else {
+                f32::INFINITY
+            };
             let mut job = if config.interface.syntax_highlighting {
                 self.syntax
                     .get_or_insert_with(SyntaxLayouts::new)
@@ -86,7 +98,8 @@ impl Editor {
             job.wrap.max_width = wrap_width;
             ui.fonts(|fonts| fonts.layout_job(job))
         };
-        ScrollArea::vertical().id_salt(id).show(ui, |ui| {
+        let scroll = ScrollArea::new([!wrap_lines, true]).id_salt(id);
+        scroll.show(ui, |ui| {
             let mut area = ui.available_rect_before_wrap();
             let gutter_right = area.left() + gutter;
             area.min.x = gutter_right;
@@ -112,6 +125,41 @@ impl Editor {
             }
             if let Some(range) = output.cursor_range {
                 document.cursor = range.primary.ccursor.index;
+            }
+            if let Some(found) = search_match {
+                let galley = &output.galley;
+                let start = galley.from_ccursor(CCursor::new(found.start)).rcursor;
+                let end = galley.from_ccursor(CCursor::new(found.end)).rcursor;
+                let painter = ui.painter().with_clip_rect(output.text_clip_rect);
+                let color = ui.visuals().selection.stroke.color.gamma_multiply(0.75);
+                for index in start.row..=end.row {
+                    let Some(row) = galley.rows.get(index) else {
+                        break;
+                    };
+                    let left = if index == start.row {
+                        row.x_offset(start.column)
+                    } else {
+                        row.rect.left()
+                    };
+                    let right = if index == end.row {
+                        row.x_offset(end.column)
+                    } else {
+                        row.rect.right()
+                    };
+                    if right > left {
+                        let rect = egui::Rect::from_min_max(
+                            egui::pos2(left, row.min_y()),
+                            egui::pos2(right, row.max_y()),
+                        )
+                        .translate(output.galley_pos.to_vec2());
+                        painter.rect_stroke(
+                            rect,
+                            2.0,
+                            egui::Stroke::new(1.0_f32, color),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
             }
             let cursor_style = ui.visuals().text_cursor.stroke;
             let cursor = if config.cursor_trail.enabled_for(Target::Editor)
@@ -473,9 +521,206 @@ impl SyntaxLayouts {
     }
 }
 
+#[derive(Default)]
+pub struct SearchBar {
+    open: bool,
+    focus_query: bool,
+    next_requested: bool,
+    show_replacement: bool,
+    query: String,
+    replacement: String,
+    document: Option<(u64, u64)>,
+    matches: Vec<std::ops::Range<usize>>,
+    current: usize,
+    highlight: Option<std::ops::Range<usize>>,
+}
+
+impl SearchBar {
+    pub fn toggle(&mut self) {
+        if self.open {
+            self.close();
+        } else {
+            self.open = true;
+            self.focus_query = true;
+        }
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        self.next_requested = false;
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub fn highlight(&self) -> Option<&std::ops::Range<usize>> {
+        self.highlight.as_ref().filter(|_| self.open)
+    }
+
+    fn update_matches(&mut self, document: &Document) {
+        self.document = Some((document.id, document.revision));
+        self.matches.clear();
+        if !self.query.is_empty() {
+            self.matches.extend(
+                document
+                    .text
+                    .match_indices(&self.query)
+                    .map(|(start, text)| start..start + text.len()),
+            );
+        }
+    }
+
+    fn refresh_after_edit(&mut self, document: &Document) {
+        self.update_matches(document);
+        let byte = document.text.char_indices().nth(document.cursor)
+            .map_or(document.text.len(), |(byte, _)| byte);
+        self.current = self.matches.partition_point(|found| found.end < byte);
+        if self.current == self.matches.len() {
+            self.current = 0;
+        }
+        self.highlight = self.matches.get(self.current).map(|found| {
+            let start = document.text[..found.start].chars().count();
+            start..start + self.query.chars().count()
+        });
+    }
+
+    fn select(&mut self, document: &mut Document) {
+        self.highlight = None;
+        if let Some(found) = self.matches.get(self.current) {
+            let start = document.text[..found.start].chars().count();
+            let end = start + self.query.chars().count();
+            document.cursor = end;
+            document.selection = Some(start..end);
+            self.highlight = Some(start..end);
+        }
+    }
+
+    pub fn query_id() -> egui::Id {
+        egui::Id::new("search query")
+    }
+
+    pub fn request_next(&mut self) {
+        self.next_requested = true;
+    }
+
+    pub fn show(&mut self, ui: &mut Ui, document: &mut Document) {
+        if !self.open {
+            return;
+        }
+        let mut previous = false;
+        let mut next = std::mem::take(&mut self.next_requested);
+        let mut replace = false;
+        let mut replace_all = false;
+        ui.horizontal_wrapped(|ui| {
+            let query_width = (ui.available_width() - 170.0).clamp(65.0, 180.0);
+            let query = ui.add(
+                TextEdit::singleline(&mut self.query)
+                    .id(Self::query_id())
+                    .desired_width(query_width)
+                    .hint_text("Find"),
+            );
+            if std::mem::take(&mut self.focus_query) {
+                query.request_focus();
+            }
+            if query.changed() {
+                self.update_matches(document);
+                self.current = 0;
+                self.select(document);
+            } else if self.document != Some((document.id, document.revision)) {
+                self.refresh_after_edit(document);
+            }
+            let count = self.matches.len();
+            ui.label(if count == 0 {
+                "0 matches".to_owned()
+            } else {
+                format!("{} of {count}", self.current + 1)
+            });
+            previous = ui
+                .add_enabled(count > 0, egui::Button::new("<")).on_hover_text("Previous match")
+                .clicked();
+            next |= ui
+                .add_enabled(count > 0, egui::Button::new(">")).on_hover_text("Next match")
+                .clicked();
+            ui.toggle_value(&mut self.show_replacement, "Replace…");
+            if ui.button("×").on_hover_text("Close search").clicked() {
+                self.close();
+                ui.memory_mut(|memory| memory.request_focus(Editor::id(document)));
+            }
+        });
+        if self.show_replacement {
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    TextEdit::singleline(&mut self.replacement)
+                        .desired_width(155.0)
+                        .hint_text("Replace with"),
+                );
+                replace = ui
+                    .add_enabled(!self.matches.is_empty(), egui::Button::new("Replace"))
+                    .clicked();
+                replace_all = ui
+                    .add_enabled(!self.matches.is_empty(), egui::Button::new("Replace all"))
+                    .clicked();
+            });
+        }
+        ui.separator();
+
+        if (replace || replace_all) && self.replacement != self.query {
+            let id = Editor::id(document);
+            let mut state = TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+            let before = CCursorRange::one(CCursor::new(document.cursor));
+            let mut undoer = state.undoer();
+            undoer.add_undo(&(before, document.text.clone()));
+            let byte = if replace_all {
+                document.text = document.text.replace(&self.query, &self.replacement);
+                0
+            } else {
+                let range = self.matches[self.current].clone();
+                let end = range.start + self.replacement.len();
+                document.text.replace_range(range, &self.replacement);
+                end
+            };
+            document.text_changed();
+            self.update_matches(document);
+            self.current = self
+                .matches
+                .iter()
+                .position(|found| found.start >= byte)
+                .unwrap_or(0);
+            self.select(document);
+            if self.matches.is_empty() {
+                let cursor = document.text[..byte].chars().count();
+                document.cursor = cursor;
+                document.selection = Some(cursor..cursor);
+            }
+            state.set_undoer(undoer);
+            state.store(ui.ctx(), id);
+            ui.memory_mut(|memory| memory.request_focus(id));
+        } else if !self.matches.is_empty() && (next || previous || replace) {
+            let step = if previous { self.matches.len() - 1 } else { 1 };
+            self.current = (self.current + step) % self.matches.len();
+            self.select(document);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refreshing_search_preserves_the_editing_cursor() {
+        let mut docs = Documents::default();
+        let doc = docs.current_mut();
+        doc.text = "cat cat\nxsecond".into();
+        doc.text_changed();
+        doc.cursor = 9;
+        let mut bar = SearchBar { query: "cat".into(), ..Default::default() };
+        bar.refresh_after_edit(doc);
+        assert_eq!(bar.matches.len(), 2);
+        assert_eq!(doc.cursor, 9);
+        assert_eq!(doc.selection, None);
+    }
 
     #[test]
     fn incremental_highlighting_matches_a_full_pass_after_multiline_edits() {

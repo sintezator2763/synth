@@ -7,6 +7,7 @@ mod cursor_trail;
 mod document;
 mod editor;
 mod graphics;
+mod recovery;
 mod terminal;
 
 use std::{
@@ -20,8 +21,9 @@ use std::{
 use command::{Command, Reply, Request};
 use config::{Bindings, Config, FileWatch, Side};
 use document::{DiskChange, Documents};
-use editor::Editor;
+use editor::{Editor, SearchBar};
 use eframe::egui::{self, FontId};
+use recovery::Recovery;
 use terminal::Terminal;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -31,6 +33,7 @@ enum Focus {
 }
 
 enum Confirmation {
+    SaveCopy(String),
     Reload(u64),
     Close(HashMap<u64, String>),
 }
@@ -51,6 +54,9 @@ struct Synth {
     commands: mpsc::Receiver<Request>,
     documents: Documents,
     editor: Editor,
+    search_bar: SearchBar,
+    recovery: Option<Recovery>,
+    recovery_error: Option<String>,
     terminal: Option<Terminal>,
     terminal_open: bool,
     terminal_error: Option<String>,
@@ -88,6 +94,9 @@ impl Synth {
             commands,
             documents: Documents::default(),
             editor: Editor::default(),
+            search_bar: SearchBar::default(),
+            recovery: None,
+            recovery_error: None,
             terminal: None,
             terminal_open: false,
             terminal_error: None,
@@ -110,6 +119,23 @@ impl Synth {
             ctx.set_visuals(config.palette().visuals(config.editor.theme));
             self.bindings = bindings;
             self.config = config;
+            if !self.config.interface.enable_search_and_replace {
+                self.search_bar.close();
+            }
+            if self.config.editor.recover_unsaved_documents {
+                if self.recovery.is_none() {
+                    let root = self.config_path.with_file_name("recovery");
+                    match Recovery::new(&root) {
+                        Ok(recovery) => self.recovery = Some(recovery),
+                        Err(error) => {
+                            self.recovery_error = Some(format!("Draft recovery: {error}"))
+                        }
+                    }
+                }
+            } else {
+                self.recovery = None;
+                self.recovery_error = None;
+            }
             self.terminal_error = None;
             format!("Reloaded {}", self.config_path.display())
         });
@@ -140,6 +166,14 @@ impl Synth {
     }
 
     fn execute(&mut self, ctx: &egui::Context, command: Command) -> Reply {
+        if matches!(command, Command::CancelDialog) {
+            if self.confirmation.take().is_none() {
+                return Err("No confirmation dialog is open".into());
+            }
+            self.notice = None;
+            self.pending_focus = Some(Focus::Editor);
+            return Ok(String::new());
+        }
         if self.confirmation.is_some() {
             return Err("Finish the confirmation in the Synth window first".into());
         }
@@ -167,6 +201,40 @@ impl Synth {
             Command::PreviousTab => Ok(self.documents.switch(false)),
             Command::Find(query) => self.find(Some(query)),
             Command::FindNext => self.find(None),
+            Command::ToggleSearch => {
+                if !self.config.interface.enable_search_and_replace {
+                    return Err(
+                        "Enable interface.enable_search_and_replace to show the search bar".into(),
+                    );
+                }
+                self.search_bar.toggle();
+                self.pending_focus = Some(Focus::Editor);
+                Ok(String::new())
+            }
+            Command::CloseSearch => {
+                self.search_bar.close();
+                self.pending_focus = Some(Focus::Editor);
+                Ok(String::new())
+            }
+            Command::SearchNext => {
+                if !self.search_bar.is_open() {
+                    return Err("Open the search bar with synth search toggle".into());
+                }
+                self.search_bar.request_next();
+                Ok(String::new())
+            }
+            Command::CancelDialog => unreachable!(),
+            Command::ToggleWrap => {
+                let document = self.documents.current_mut();
+                let wrap = !document.wrap_lines.unwrap_or(self.config.editor.wrap_lines);
+                document.wrap_lines = Some(wrap);
+                Ok(if wrap {
+                    "Line wrapping enabled"
+                } else {
+                    "Line wrapping disabled"
+                }
+                .into())
+            }
             Command::TerminalImage(path) => {
                 let terminal = self
                     .terminal
@@ -177,6 +245,24 @@ impl Synth {
             }
             Command::ToggleTerminal => {
                 self.toggle_terminal();
+                Ok(String::new())
+            }
+            Command::ToggleEditorTerminal => {
+                if focus == Focus::Editor {
+                    self.toggle_terminal();
+                }
+                Ok(String::new())
+            }
+            Command::CopyTerminalSelection => {
+                let terminal = self.terminal.as_ref().filter(|_| self.terminal_open)
+                    .ok_or("No terminal panel is open")?;
+                terminal.copy_selection(ctx);
+                Ok(String::new())
+            }
+            Command::HideTerminal => {
+                if self.terminal_open {
+                    self.toggle_terminal();
+                }
                 Ok(String::new())
             }
             Command::ToggleFocus => {
@@ -266,6 +352,14 @@ impl Synth {
         let mut discard = false;
         let result = egui::Modal::new(egui::Id::new("confirm document changes")).show(ctx, |ui| {
             match &mut confirmation {
+                Confirmation::SaveCopy(path) => {
+                    ui.heading("Save a copy");
+                    ui.add(egui::TextEdit::singleline(path).hint_text("Destination file path"));
+                    ui.horizontal(|ui| {
+                        canceled = ui.button("Cancel").clicked();
+                        accepted = ui.add_enabled(!path.is_empty(), egui::Button::new("Save copy")).clicked();
+                    });
+                }
                 Confirmation::Reload(_) => {
                     ui.heading("Reload from disk?");
                     ui.label("This will discard your edits to the active document.");
@@ -307,7 +401,7 @@ impl Synth {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
         });
-        if canceled || result.should_close() {
+        if canceled || result.backdrop_response.clicked() {
             self.notice = None;
             self.pending_focus = Some(Focus::Editor);
             return;
@@ -319,6 +413,9 @@ impl Synth {
         }
         if accepted {
             let result = match &confirmation {
+                Confirmation::SaveCopy(path) => std::path::absolute(path)
+                    .map_err(|error| io_message(&error))
+                    .and_then(|destination| self.documents.save(Some(&destination))).map(|_| ()),
                 Confirmation::Reload(id) => self.documents.reload(*id).map(|_| ()),
                 Confirmation::Close(paths) => self.save_changed(paths),
             };
@@ -373,10 +470,24 @@ impl Synth {
     }
 
     fn shortcut_commands(&self, ctx: &egui::Context) -> Vec<Command> {
-        if self.confirmation.is_some() {
-            return Vec::new();
-        }
         let terminal_focused = self.focus(ctx) == Focus::Terminal;
+        let search_open = self.search_bar.is_open();
+        let query_focused = ctx.memory(|memory| memory.has_focus(SearchBar::query_id()));
+        let dialog_open = self.confirmation.is_some();
+        let available = |command: &Command| {
+            if dialog_open {
+                return matches!(command, Command::CancelDialog);
+            }
+            match command {
+                Command::CancelDialog => false,
+                Command::ToggleSearch => self.config.interface.enable_search_and_replace && !terminal_focused,
+                Command::CloseSearch => search_open && !terminal_focused,
+                Command::SearchNext => search_open && query_focused && !terminal_focused,
+                Command::CopyTerminalSelection => terminal_focused,
+                Command::ToggleEditorTerminal => !terminal_focused,
+                _ => true,
+            }
+        };
         ctx.input_mut(|input| {
             let mut commands = Vec::new();
             let mut discard_text = false;
@@ -394,10 +505,7 @@ impl Synth {
                     && let Some((_, command)) = self.bindings.iter().find(|(shortcut, command)| {
                         *key == shortcut.logical_key
                             && modifiers.matches_exact(shortcut.modifiers)
-                            && !(terminal_focused
-                                && *key == egui::Key::Escape
-                                && modifiers.is_none()
-                                && matches!(command, Command::ToggleTerminal))
+                            && available(command)
                     })
                 {
                     if *pressed && !*repeat {
@@ -422,6 +530,11 @@ impl Synth {
         if progress == 0.0 {
             if let Some(terminal) = &mut self.terminal {
                 terminal.clear_cursor_trail();
+                let palette = self.config.palette();
+                if terminal.process_events(ctx, palette.foreground, palette.terminal_background) {
+                    self.terminal = None;
+                    if self.terminal_open { self.toggle_terminal(); }
+                }
             }
             return;
         }
@@ -487,6 +600,12 @@ impl Synth {
 }
 
 impl eframe::App for Synth {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        if self.focus(ctx) == Focus::Terminal {
+            terminal::restore_modified_copy_key(input);
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         #[cfg(windows)]
         if std::mem::take(&mut self.maximize_on_startup) {
@@ -533,15 +652,51 @@ impl eframe::App for Synth {
                 } else {
                     self.notice.as_ref()
                 };
-                for error in [self.config_error.as_ref(), notice].into_iter().flatten() {
+                for error in [
+                    self.config_error.as_ref(),
+                    self.recovery_error.as_ref(),
+                    notice,
+                ]
+                .into_iter()
+                .flatten()
+                {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 let mut reload = false;
                 ui.add_enabled_ui(!modal_open, |ui| {
+                    if let Some(recovery) = &mut self.recovery {
+                        for warning in &recovery.warnings {
+                            ui.colored_label(ui.visuals().error_fg_color, format!("Unreadable draft: {warning}"));
+                        }
+                        if recovery.choices().next().is_some() {
+                            ui.label("Unsaved drafts from previous sessions");
+                            egui::ScrollArea::vertical().id_salt("draft choices").max_height(120.0).show(ui, |ui| {
+                                for (label, selected) in recovery.choices() {
+                                    ui.checkbox(selected, label);
+                                }
+                            });
+                            let selected = recovery.choices().any(|(_, selected)| *selected);
+                            ui.add_enabled_ui(selected, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.button("Restore selected").clicked() {
+                                        recovery.restore(&mut self.documents);
+                                        self.pending_focus = Some(Focus::Editor);
+                                    }
+                                    if ui.button("Discard selected").clicked()
+                                        && let Err(error) = recovery.discard()
+                                    {
+                                        self.notice = Some(format!("Draft recovery: {error}"));
+                                    }
+                                });
+                            });
+                            ui.separator();
+                        }
+                    }
                     let document = self.documents.current_mut();
                     if let Some(change) = self
                         .watched_document
                         .as_ref()
+                        .filter(|watched| watched.id == document.id)
                         .and_then(|watched| watched.change)
                         && document.dismissed_disk_change != Some(change)
                     {
@@ -555,7 +710,14 @@ impl eframe::App for Synth {
                         };
                         ui.label(message);
                         ui.horizontal_wrapped(|ui| {
-                            reload = ui.button("Reload from disk").clicked();
+                            match change {
+                                DiskChange::Modified(_) => reload = ui.button("Reload from disk").clicked(),
+                                DiskChange::Unavailable => {
+                                    if ui.button("Save a copy…").clicked() {
+                                        self.confirmation = Some(Confirmation::SaveCopy(String::new()));
+                                    }
+                                }
+                            }
                             if ui.button("Keep editing").clicked() {
                                 document.dismissed_disk_change = Some(change);
                                 self.pending_focus = Some(Focus::Editor);
@@ -563,7 +725,8 @@ impl eframe::App for Synth {
                         });
                         ui.separator();
                     }
-                    self.editor.show(ui, document, &self.config);
+                    self.search_bar.show(ui, document);
+                    self.editor.show(ui, document, &self.config, self.search_bar.highlight());
                 });
                 if reload && let Err(error) = self.execute(ctx, Command::Reload) {
                     self.notice = Some(error);
@@ -582,6 +745,12 @@ impl eframe::App for Synth {
         }
 
         self.confirm(ctx);
+        if let Some(recovery) = &mut self.recovery {
+            self.recovery_error = recovery
+                .sync(ctx, &self.documents)
+                .err()
+                .map(|error| format!("Draft recovery: {error}"));
+        }
     }
 }
 

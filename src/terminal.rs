@@ -260,6 +260,45 @@ impl Terminal {
         egui::Id::new("terminal input")
     }
 
+    pub fn process_events(&mut self, ctx: &egui::Context, foreground: Color32, background: Color32) -> bool {
+        for event in self.events.try_iter() {
+            let event = match event {
+                TerminalEvent::Terminal(event) => event,
+                TerminalEvent::Graphics(packet, (row, column)) => {
+                    let position = {
+                        let term = self.term.lock();
+                        Position {
+                            row: (term.grid().history_size() + row) as i64,
+                            column,
+                            alternate: term.mode().contains(TermMode::ALT_SCREEN),
+                        }
+                    };
+                    if let Some(reply) = self.graphics.receive(ctx, packet, position) {
+                        self.write(reply);
+                    }
+                    continue;
+                }
+            };
+            match event {
+                Event::Exit | Event::ChildExit(_) => return true,
+                Event::PtyWrite(text) => self.write(text),
+                Event::TextAreaSizeRequest(format) => self.write(format(self.size)),
+                Event::ColorRequest(index, format) => {
+                    let color = self.term.lock().colors()[index]
+                        .map_or_else(|| palette(index, foreground, background), rgb_color);
+                    self.write(format(Rgb {
+                        r: color.r(),
+                        g: color.g(),
+                        b: color.b(),
+                    }));
+                }
+                Event::ClipboardStore(_, text) => ctx.copy_text(text),
+                _ => {}
+            }
+        }
+        false
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -288,41 +327,7 @@ impl Terminal {
             let _ = self.sender.send(Msg::Resize(size));
             self.size = size;
         }
-        for event in self.events.try_iter() {
-            let event = match event {
-                TerminalEvent::Terminal(event) => event,
-                TerminalEvent::Graphics(packet, (row, column)) => {
-                    let position = {
-                        let term = self.term.lock();
-                        Position {
-                            row: (term.grid().history_size() + row) as i64,
-                            column,
-                            alternate: term.mode().contains(TermMode::ALT_SCREEN),
-                        }
-                    };
-                    if let Some(reply) = self.graphics.receive(ui.ctx(), packet, position) {
-                        self.write(reply);
-                    }
-                    continue;
-                }
-            };
-            match event {
-                Event::Exit | Event::ChildExit(_) => return true,
-                Event::PtyWrite(text) => self.write(text),
-                Event::TextAreaSizeRequest(format) => self.write(format(self.size)),
-                Event::ColorRequest(index, format) => {
-                    let color = self.term.lock().colors()[index]
-                        .map_or_else(|| palette(index, foreground, background), rgb_color);
-                    self.write(format(Rgb {
-                        r: color.r(),
-                        g: color.g(),
-                        b: color.b(),
-                    }));
-                }
-                Event::ClipboardStore(_, text) => ui.ctx().copy_text(text),
-                _ => {}
-            }
-        }
+        if self.process_events(ui.ctx(), foreground, background) { return true; }
         let response = ui.interact(
             rect.intersect(ui.clip_rect()),
             Self::focus_id(),
@@ -359,6 +364,12 @@ impl Terminal {
         let _ = self.sender.send(Msg::Input(bytes.into().into()));
     }
 
+    pub fn copy_selection(&self, ctx: &egui::Context) {
+        if let Some(text) = self.term.lock().selection_to_string() {
+            ctx.copy_text(text);
+        }
+    }
+
     fn keyboard_input(&self, ui: &egui::Ui) {
         let mode = *self.term.lock().mode();
         let mut events = ui
@@ -382,10 +393,14 @@ impl Terminal {
                     let selection = self.term.lock().selection_to_string();
                     if !cfg!(target_os = "macos") && modifiers.ctrl && !modifiers.shift {
                         self.write(b"\x03");
-                    } else if let Some(text) = selection {
-                        ui.ctx().copy_text(text);
-                    } else if !cfg!(target_os = "macos") && !modifiers.shift {
-                        self.write(b"\x03");
+                    } else if !modifiers.ctrl || !modifiers.shift {
+                        if let Some(text) = selection {
+                            ui.ctx().copy_text(text);
+                        } else if !cfg!(target_os = "macos") && !modifiers.shift {
+                            self.write(b"\x03");
+                        }
+                    } else if let Some(bytes) = key_bytes(Key::C, modifiers, mode) {
+                        self.write(bytes);
                     }
                 }
                 egui::Event::Cut if !cfg!(target_os = "macos") => self.write(b"\x18"),
@@ -415,10 +430,6 @@ impl Terminal {
                             events.next();
                         }
                         self.write(sequence);
-                    } else if pressed && key == Key::C && modifiers.ctrl && modifiers.shift {
-                        if let Some(text) = self.term.lock().selection_to_string() {
-                            ui.ctx().copy_text(text);
-                        }
                     } else if pressed && let Some(bytes) = key_bytes(key, modifiers, mode) {
                         self.write(bytes);
                     }
@@ -700,6 +711,29 @@ struct KeyStroke<'a> {
     repeat: bool,
     modifiers: Modifiers,
     associated: Option<&'a str>,
+}
+
+pub fn restore_modified_copy_key(input: &mut egui::RawInput) {
+    for index in 0..input.events.len() {
+        if !matches!(input.events[index], egui::Event::Copy) {
+            continue;
+        }
+        let modifiers = input.events[index + 1..].iter()
+            .take_while(|event| !matches!(event, egui::Event::Copy))
+            .find_map(|event| match event {
+                egui::Event::Key { key: Key::C, pressed: false, modifiers, .. } => Some(*modifiers),
+                _ => None,
+            }).unwrap_or(input.modifiers);
+        if modifiers.ctrl && modifiers.shift {
+            input.events[index] = egui::Event::Key {
+                key: Key::C,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            };
+        }
+    }
 }
 
 fn printable_key(key: Key) -> Option<char> {

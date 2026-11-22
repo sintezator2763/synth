@@ -3,12 +3,15 @@
 [editor]
 theme = "dark" # dark, light
 font_size = 16.0
+wrap_lines = true # wrap to the editor width, false enables horizontal scrolling
+recover_unsaved_documents = true # keep local drafts of unsaved edits and offer recovery after a crash
 
 [interface]
 show_tabs = false
 show_line_numbers = false
 syntax_highlighting = false
 show_status_bar = false
+enable_search_and_replace = false # enable the search and replace bar (Ctrl+F or Cmd+F)
 show_external_file_changes = true # show a reload prompt when the active file changes on disk
 tab_height = 36.0
 tab_max_chars = 28
@@ -47,17 +50,25 @@ command_target = "window" # window or shared, applies to the next terminal sessi
 font_size = 14.0
 # shell = "pwsh" # omit for the platform default
 args = [] # arguments for a custom shell
-# toggle_key = "Esc" # legacy shortcut, used when [keybindings] is absent
+# toggle_key = "Esc" # legacy shortcut, used when [keybinds] is absent
 # animation_ms = 180 # legacy duration, used when [animations.terminal] is absent
 
-[keybindings]
-Esc = "synth terminal toggle"
+# Run synth help for every command available to bind.
+[keybinds]
+"Command+F" = "synth search toggle" # Ctrl+F on Windows/Linux, Cmd+F on macOS
+# For a list, the first action available in the current view wins.
+Esc = ["synth dialog cancel", "synth search close", "synth terminal toggle-edit"]
+Enter = "synth search next" # only while the search field has focus
+"Ctrl+Shift+C" = "synth terminal copy" # only while the terminal has focus
+"Shift+Esc" = "synth terminal hide" # hide the panel even when the terminal has focus
 # "Ctrl+Alt+F" = "synth focus toggle"
 # "Ctrl+S" = "synth save"
 # "Ctrl+N" = "synth new"
 # "Ctrl+PageDown" = "synth tab next"
 # "Ctrl+PageUp" = "synth tab prev"
 # "Ctrl+Shift+R" = "synth config reload"
+# "Ctrl+Alt+W" = "synth wrap toggle" # switch wrapping for the active tab
+# "Ctrl+Alt+S" = "synth search toggle" # an alternative shortcut for the search bar
 
 # Panel animations. Cursor trails are controlled independently below.
 # direction: in, out, in_out, out_in
