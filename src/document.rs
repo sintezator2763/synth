@@ -354,6 +354,12 @@ impl Document {
         cursor.min(self.char_count)
     }
 
+    pub fn edit_cursor(&self, cursor: usize) -> usize {
+        let cursor = self.clamp_cursor(cursor);
+        let line = self.line_starts.partition_point(|&start| start <= cursor) - 1;
+        cursor.min(self.line_ends[line])
+    }
+
     fn position_at(&self, cursor: usize) -> (usize, usize) {
         let cursor = self.clamp_cursor(cursor);
         let line = self.line_starts.partition_point(|&start| start <= cursor);

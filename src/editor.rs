@@ -23,18 +23,6 @@ struct EditBuffer<'a> {
 }
 
 impl EditBuffer<'_> {
-    fn insertion_cursor(&self, cursor: usize) -> usize {
-        let cursor = self.document.clamp_cursor(cursor);
-        let byte = self.document.byte_at_char(cursor);
-        if self.document.text[..byte].ends_with('\r')
-            && self.document.text[byte..].starts_with('\n')
-        {
-            cursor - 1
-        } else {
-            cursor
-        }
-    }
-
     fn deletion_range(&self, mut range: std::ops::Range<usize>) -> std::ops::Range<usize> {
         if range.is_empty() {
             return range;
@@ -61,7 +49,7 @@ impl egui::TextBuffer for EditBuffer<'_> {
     }
 
     fn insert_text(&mut self, text: &str, cursor: usize) -> usize {
-        let cursor = self.insertion_cursor(cursor);
+        let cursor = self.document.edit_cursor(cursor);
         let mut insertion = std::borrow::Cow::Borrowed(text);
         if text == "\t" && self.config.insert_spaces {
             let column = self.document.column_at(cursor);
@@ -80,7 +68,7 @@ impl egui::TextBuffer for EditBuffer<'_> {
     }
 
     fn insert_text_at(&mut self, cursor: &mut CCursor, text: &str, char_limit: usize) {
-        cursor.index = self.insertion_cursor(cursor.index);
+        cursor.index = self.document.edit_cursor(cursor.index);
         let text = if char_limit == usize::MAX {
             text
         } else {
@@ -110,6 +98,19 @@ impl egui::TextBuffer for EditBuffer<'_> {
         cursor.index = cursor.index.saturating_sub(remove).max(row);
     }
 
+    fn delete_previous_char(&mut self, mut cursor: CCursor) -> CCursor {
+        cursor.index = self.document.edit_cursor(cursor.index);
+        if cursor.index == 0 {
+            return cursor;
+        }
+        self.delete_selected_ccursor_range([cursor - 1, cursor])
+    }
+
+    fn delete_next_char(&mut self, mut cursor: CCursor) -> CCursor {
+        cursor.index = self.document.edit_cursor(cursor.index);
+        self.delete_selected_ccursor_range([cursor, cursor + 1])
+    }
+
     fn delete_char_range(&mut self, range: std::ops::Range<usize>) {
         let range = self.deletion_range(range);
         self.document.replace_chars(range, "");
@@ -117,7 +118,7 @@ impl egui::TextBuffer for EditBuffer<'_> {
 
     fn delete_selected_ccursor_range(&mut self, [min, max]: [CCursor; 2]) -> CCursor {
         let range = self.deletion_range(min.index..max.index);
-        let cursor = self.insertion_cursor(range.start);
+        let cursor = self.document.edit_cursor(range.start);
         self.document.replace_chars(range, "");
         CCursor::new(cursor)
     }
@@ -334,8 +335,8 @@ impl Editor {
                     .show(&mut editor);
                 ui.advance_cursor_after_rect(editor.min_rect().union(area));
                 if let Some(range) = output.cursor_range {
-                    document.cursor = range.primary.ccursor.index;
-                    let other = range.secondary.ccursor.index;
+                    document.cursor = document.edit_cursor(range.primary.ccursor.index);
+                    let other = document.edit_cursor(range.secondary.ccursor.index);
                     document.selected_range = (document.cursor != other)
                         .then_some(document.cursor.min(other)..document.cursor.max(other));
                     if output.response.has_focus() {
@@ -1059,6 +1060,119 @@ impl SearchBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn editor_frame(
+        ctx: &egui::Context,
+        editor: &mut Editor,
+        doc: &mut Document,
+        pane: u64,
+        keys: &[egui::Key],
+    ) {
+        let input = egui::RawInput {
+            events: keys
+                .iter()
+                .map(|&key| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            ctx.memory_mut(|memory| memory.request_focus(Editor::id(doc, pane)));
+            egui::CentralPanel::default().show(ctx, |ui| {
+                editor.show(ui, doc, &Config::default(), pane, None);
+            });
+        });
+    }
+
+    #[test]
+    fn text_edit_backspace_at_visual_line_boundaries() {
+        use egui::Key::{Backspace, Delete, End};
+        for (source, line, column, keys, expected, position) in [
+            ("abc\nnext", 1, 1, &[End, Backspace][..], "ab\nnext", (1, 3)),
+            (
+                "abc\r\nnext",
+                1,
+                1,
+                &[End, Backspace][..],
+                "ab\r\nnext",
+                (1, 3),
+            ),
+            (
+                "猫🦀\r\n次",
+                1,
+                1,
+                &[End, Backspace][..],
+                "猫\r\n次",
+                (1, 2),
+            ),
+            ("abc\nnext", 2, 1, &[Backspace][..], "abcnext", (1, 4)),
+            ("abc\r\nnext", 2, 1, &[Backspace][..], "abcnext", (1, 4)),
+            ("abc\nnext", 1, 1, &[End, Delete][..], "abcnext", (1, 4)),
+            ("abc\r\nnext", 1, 1, &[End, Delete][..], "abcnext", (1, 4)),
+            (
+                "abc\n\nnext",
+                2,
+                1,
+                &[End, Backspace][..],
+                "abc\nnext",
+                (1, 4),
+            ),
+            (
+                "abc\r\n\r\nnext",
+                2,
+                1,
+                &[End, Backspace][..],
+                "abc\r\nnext",
+                (1, 4),
+            ),
+            ("\r\nnext", 1, 1, &[End, Backspace][..], "\r\nnext", (1, 1)),
+            ("a\n猫🦀", 2, 1, &[End, Backspace][..], "a\n猫", (2, 2)),
+            ("a\r\n猫🦀", 2, 1, &[End, Backspace][..], "a\r\n猫", (2, 2)),
+            ("a\r\n", 2, 1, &[Backspace][..], "a", (1, 2)),
+        ] {
+            let ctx = egui::Context::default();
+            let mut editor = Editor::default();
+            let mut documents = Documents::default();
+            let doc = documents.current_mut();
+            doc.text = source.to_owned();
+            doc.text_changed();
+            doc.goto(line, column).unwrap();
+            editor_frame(&ctx, &mut editor, doc, 0, &[]);
+            editor_frame(&ctx, &mut editor, doc, 0, keys);
+            assert_eq!(doc.text, expected, "{source:?} at {line}:{column}");
+            assert_eq!(doc.position(), position, "{source:?} at {line}:{column}");
+        }
+    }
+
+    #[test]
+    fn text_edit_backspace_after_editing_and_switching_panes() {
+        use egui::Key::{Backspace, End, Enter};
+
+        let ctx = egui::Context::default();
+        let mut editor = Editor::default();
+        let mut documents = Documents::default();
+        let doc = documents.current_mut();
+        doc.text = "猫🦀\r\nnext".into();
+        doc.set_ending(LineEnding::Crlf).unwrap();
+
+        doc.goto(1, 1).unwrap();
+        editor_frame(&ctx, &mut editor, doc, 0, &[End]);
+        assert_eq!(doc.cursor, 2);
+        doc.goto(2, 5).unwrap();
+        editor_frame(&ctx, &mut editor, doc, 1, &[Enter]);
+        assert_eq!(doc.text, "猫🦀\r\nnext\r\n");
+        editor_frame(&ctx, &mut editor, doc, 0, &[Backspace]);
+        assert_eq!(doc.text, "猫\r\nnext\r\n");
+        assert_eq!(doc.position(), (1, 2));
+        editor_frame(&ctx, &mut editor, doc, 1, &[Backspace]);
+        assert_eq!(doc.text, "猫\r\nnext");
+        assert_eq!(doc.position(), (2, 5));
+    }
 
     #[test]
     fn editor_insertions_and_deletions_preserve_indentation_and_crlf() {
