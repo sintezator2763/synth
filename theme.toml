@@ -1,0 +1,19 @@
+# Copy a theme here to import it. Omitted colors use the defaults for mode.
+mode = "dark" # dark or light
+
+[palette]
+editor_bg = "#222322"
+text_fg = "#E8DFCE"
+selection_bg = "#55453B"
+surface_bg = "#2E2D2B"
+terminal_bg = "#1C1D1C"
+tab_bar_bg = "#292927"
+tab_active_bg = "#34332F"
+tab_active_fg = "#F3E9D7"
+tab_inactive_fg = "#B7AEA1"
+status_bar_bg = "#292927"
+accent = "#DE916D"
+current_line = "#2A2B29"
+syntax_string = "#ADBE91"
+syntax_comment = "#9C978C"
+syntax_literal = "#DEB883"

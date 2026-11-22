@@ -6,13 +6,13 @@ use eframe::egui::{
 };
 use syntect::{
     easy::HighlightLines,
-    highlighting::{HighlightState, ThemeSet},
+    highlighting::{HighlightState, StyleModifier, Theme as SyntaxTheme, ThemeItem},
     parsing::{ParseState, SyntaxSet},
     util::LinesWithEndings,
 };
 
 use crate::{
-    config::{Config, Theme},
+    config::{Config, Palette},
     cursor_trail::{Cursor, Target, Trail},
     document::{Document, Documents},
 };
@@ -24,6 +24,9 @@ pub struct Editor {
 }
 
 impl Editor {
+    pub fn reset_highlighting(&mut self) {
+        self.syntax = None;
+    }
     pub fn id(document: &Document) -> egui::Id {
         egui::Id::new(("document", document.id))
     }
@@ -83,15 +86,8 @@ impl Editor {
             };
             let mut job = if config.interface.syntax_highlighting {
                 self.syntax
-                    .get_or_insert_with(SyntaxLayouts::new)
-                    .highlight(
-                        document_id,
-                        path.as_deref(),
-                        text,
-                        &font,
-                        config.editor.theme,
-                        foreground,
-                    )
+                    .get_or_insert_with(|| SyntaxLayouts::new(config.palette()))
+                    .highlight(document_id, path.as_deref(), text, &font, foreground)
             } else {
                 LayoutJob::simple(text.to_owned(), font.clone(), foreground, wrap_width)
             };
@@ -108,6 +104,7 @@ impl Editor {
                     .max_rect(area)
                     .layout(Layout::top_down(Align::Min)),
             );
+            let line_shape = ui.painter().add(egui::Shape::Noop);
             let output = TextEdit::multiline(&mut document.text)
                 .id(id)
                 .font(font.clone())
@@ -125,6 +122,21 @@ impl Editor {
             }
             if let Some(range) = output.cursor_range {
                 document.cursor = range.primary.ccursor.index;
+                if output.response.has_focus() {
+                    let caret = output
+                        .galley
+                        .pos_from_cursor(&range.primary)
+                        .translate(output.galley_pos.to_vec2());
+                    let line =
+                        egui::Rect::from_x_y_ranges(ui.clip_rect().x_range(), caret.y_range())
+                            .intersect(ui.clip_rect());
+                    if line.is_positive() {
+                        ui.painter().set(
+                            line_shape,
+                            egui::Shape::rect_filled(line, 0.0, config.palette().current_line),
+                        );
+                    }
+                }
             }
             if let Some(found) = search_match {
                 let galley = &output.galley;
@@ -270,7 +282,6 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                         };
                         let tab = egui::Frame::NONE
                             .fill(fill)
-                            .corner_radius(egui::CornerRadius::same(6))
                             .inner_margin(egui::Margin::symmetric(12, 6))
                             .show(ui, |ui| {
                                 ui.set_min_width(config.interface.tab_min_width);
@@ -288,13 +299,17 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                                             &document.name(),
                                             config.interface.tab_max_chars,
                                         ))
-                                        .monospace()
                                         .size(config.interface.tab_font_size)
                                         .color(foreground),
                                     );
                                 });
                             });
                         if active {
+                            ui.painter().hline(
+                                tab.response.rect.x_range(),
+                                tab.response.rect.bottom(),
+                                egui::Stroke::new(2.0_f32, palette.accent),
+                            );
                             let key = ui.id().with("visible active tab");
                             let previous = ui.data_mut(|data| data.get_temp::<u64>(key));
                             if previous != Some(document.id) {
@@ -366,10 +381,10 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
             bar.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
                     RichText::new(format!("{encoding}  |  {lines} {unit}  |  {line}:{column}"))
-                        .monospace(),
+                        .size(12.0),
                 );
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.add(egui::Label::new(RichText::new(label).monospace()).truncate())
+                    ui.add(egui::Label::new(RichText::new(label).size(12.0)).truncate())
                         .on_hover_text(document.display_path());
                 });
             });
@@ -378,14 +393,13 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
 
 struct SyntaxLayouts {
     syntaxes: SyntaxSet,
-    themes: ThemeSet,
+    theme: SyntaxTheme,
     cached: HashMap<u64, HighlightedDocument>,
 }
 
 #[derive(Clone, PartialEq)]
 struct SyntaxStyle {
     syntax: usize,
-    theme: Theme,
     font: FontId,
 }
 
@@ -405,10 +419,32 @@ struct HighlightCheckpoint {
 const HIGHLIGHT_CHECKPOINT_LINES: usize = 64;
 
 impl SyntaxLayouts {
-    fn new() -> Self {
+    fn new(palette: Palette) -> Self {
+        let color = |value: Color32| syntect::highlighting::Color {
+            r: value.r(),
+            g: value.g(),
+            b: value.b(),
+            a: 255,
+        };
+        let mut theme = SyntaxTheme::default();
+        theme.settings.foreground = Some(color(palette.foreground));
+        for (scope, ink) in [
+            ("keyword, storage, entity.name.tag", palette.accent),
+            ("string", palette.syntax_string),
+            ("constant, support.type", palette.syntax_literal),
+            ("comment", palette.syntax_comment),
+        ] {
+            theme.scopes.push(ThemeItem {
+                scope: scope.parse().expect("built-in syntax scope"),
+                style: StyleModifier {
+                    foreground: Some(color(ink)),
+                    ..Default::default()
+                },
+            });
+        }
         Self {
-            syntaxes: SyntaxSet::load_defaults_newlines(),
-            themes: ThemeSet::load_defaults(),
+            syntaxes: two_face::syntax::extra_newlines(),
+            theme,
             cached: HashMap::new(),
         }
     }
@@ -419,16 +455,19 @@ impl SyntaxLayouts {
         path: Option<&std::path::Path>,
         text: &str,
         font: &FontId,
-        theme: Theme,
         foreground: Color32,
     ) -> LayoutJob {
-        let extension = path
-            .and_then(std::path::Path::extension)
-            .and_then(std::ffi::OsStr::to_str)
-            .map(str::to_owned);
-        let syntax = extension
-            .as_deref()
-            .and_then(|extension| self.syntaxes.find_syntax_by_extension(extension))
+        let syntax = path
+            .and_then(|path| {
+                let name = path.file_name()?.to_str()?;
+                self.syntaxes
+                    .find_syntax_by_extension(name)
+                    .or_else(|| self.syntaxes.find_syntax_by_name(name))
+                    .or_else(|| {
+                        self.syntaxes
+                            .find_syntax_by_extension(path.extension()?.to_str()?)
+                    })
+            })
             .or_else(|| {
                 text.lines()
                     .next()
@@ -445,7 +484,6 @@ impl SyntaxLayouts {
                 .iter()
                 .position(|candidate| std::ptr::eq(candidate, syntax))
                 .expect("syntax in this set"),
-            theme,
             font: font.clone(),
         };
         let cached = self
@@ -464,11 +502,7 @@ impl SyntaxLayouts {
             cached.job = LayoutJob::default();
             cached.checkpoints.clear();
         }
-        let theme = match theme {
-            Theme::Dark => "base16-ocean.dark",
-            Theme::Light => "InspiredGitHub",
-        };
-        let theme = &self.themes.themes[theme];
+        let theme = &self.theme;
         let prefix = cached
             .job
             .text
@@ -784,30 +818,57 @@ mod tests {
     }
 
     #[test]
+    fn extra_languages_produce_styled_tokens() {
+        let mut layouts = SyntaxLayouts::new(Config::default().palette());
+        let font = FontId::monospace(16.0);
+        for (path, text) in [
+            ("app.ts", "const greeting: string = 'hello';"),
+            ("main.tsx", "export const App = () => <div>Hello</div>;"),
+            ("build.zig", "const name = \"synth\";"),
+            ("app.kt", "val name = \"synth\""),
+            ("theme.toml", "mode = 'dark'"),
+            ("Dockerfile", "FROM alpine:latest"),
+        ] {
+            let job = layouts.highlight(
+                0,
+                Some(std::path::Path::new(path)),
+                text,
+                &font,
+                Color32::WHITE,
+            );
+            assert_eq!(job.text, text);
+            assert!(
+                job.sections
+                    .iter()
+                    .any(|s| s.format.color != job.sections[0].format.color),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
     fn incremental_highlighting_matches_a_full_pass_after_multiline_edits() {
-        let mut layouts = SyntaxLayouts::new();
+        let mut layouts = SyntaxLayouts::new(Config::default().palette());
         let path = Some(std::path::Path::new("file.rs"));
         let font = FontId::monospace(16.0);
         let mut text = "let value = 1;\n".repeat(90);
         text.push_str("/* begin\n");
         text.push_str(&"inside\n".repeat(80));
         text.push_str("*/\nlet tail = 2;\n");
-        layouts.highlight(1, path, &text, &font, Theme::Dark, Color32::WHITE);
-        layouts.highlight(2, path, "fn main() {}", &font, Theme::Dark, Color32::WHITE);
+        layouts.highlight(1, path, &text, &font, Color32::WHITE);
+        layouts.highlight(2, path, "fn main() {}", &font, Color32::WHITE);
         assert!(layouts.cached.contains_key(&1));
         for edited in [
             text.replace("inside\n*/", "changed\n*/"),
             text.replace("/* begin", "// begin"),
             text[..text.find("/* begin").unwrap()].to_owned(),
         ] {
-            let incremental =
-                layouts.highlight(1, path, &edited, &font, Theme::Dark, Color32::WHITE);
-            let full = SyntaxLayouts::new().highlight(
+            let incremental = layouts.highlight(1, path, &edited, &font, Color32::WHITE);
+            let full = SyntaxLayouts::new(Config::default().palette()).highlight(
                 1,
                 path,
                 &edited,
                 &font,
-                Theme::Dark,
                 Color32::WHITE,
             );
             assert_eq!(incremental, full);

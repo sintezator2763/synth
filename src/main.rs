@@ -72,6 +72,29 @@ struct Synth {
 
 impl Synth {
     fn new(ctx: &egui::Context, installation: PathBuf, config_path: PathBuf) -> Self {
+        let mut fonts = egui::FontDefinitions::default();
+        for (name, family, data) in [
+            (
+                "IBM Plex Mono",
+                egui::FontFamily::Monospace,
+                include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf").as_slice(),
+            ),
+            (
+                "IBM Plex Sans",
+                egui::FontFamily::Proportional,
+                include_bytes!("../assets/fonts/IBMPlexSans.ttf").as_slice(),
+            ),
+        ] {
+            fonts
+                .font_data
+                .insert(name.into(), egui::FontData::from_static(data).into());
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .insert(0, name.into());
+        }
+        ctx.set_fonts(fonts);
         ctx.options_mut(|options| options.zoom_with_keyboard = false);
         let setup_error = Config::ensure_file(&config_path, &installation)
             .err()
@@ -82,7 +105,7 @@ impl Synth {
                     io_message(&error)
                 )
             });
-        let (watcher, watch_error) = match FileWatch::new(&config_path, ctx.clone()) {
+        let (watcher, watch_error) = match FileWatch::watch_settings(&config_path, ctx.clone()) {
             Ok(watcher) => (Some(watcher), None),
             Err(error) => (None, Some(format!("Config watcher: {error}"))),
         };
@@ -120,6 +143,9 @@ impl Synth {
     fn reload_config(&mut self, ctx: &egui::Context) -> Reply {
         let result = Config::load(&self.config_path).map(|(config, bindings)| {
             ctx.set_visuals(config.palette().visuals(config.editor.theme));
+            if self.config.palette() != config.palette() {
+                self.editor.reset_highlighting();
+            }
             self.bindings = bindings;
             if self.config.terminal.font_size != config.terminal.font_size {
                 self.terminal_font_override = None;
@@ -589,7 +615,7 @@ impl Synth {
         let background = self.config.palette().terminal_background;
         panel
             .resizable(false)
-            .show_separator_line(false)
+            .show_separator_line(true)
             .exact_width(width * progress)
             .frame(egui::Frame::NONE.fill(background))
             .show(ctx, |ui| {
@@ -825,6 +851,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.len() == 1 && matches!(args[0].to_str(), Some("help" | "--help" | "-h")) {
         print!("{}", command::help());
+        return Ok(());
+    }
+    if args.len() == 1 && args[0] == "--licenses" {
+        let mut notices = String::new();
+        for license in two_face::acknowledgement::listing().for_syntaxes() {
+            license.write_md(&mut notices);
+        }
+        print!(
+            "{}\n{}\n{notices}",
+            include_str!("../assets/fonts/Mono-OFL.txt"),
+            include_str!("../assets/fonts/Sans-OFL.txt")
+        );
         return Ok(());
     }
     let installation = config::installation_path()?;

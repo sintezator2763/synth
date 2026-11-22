@@ -106,9 +106,22 @@ pub struct Colors {
     light: ColorOverrides,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeFile {
+    mode: Theme,
+    #[serde(default)]
+    palette: ColorOverrides,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ColorOverrides {
+    syntax_literal: Option<HexColor>,
+    syntax_comment: Option<HexColor>,
+    syntax_string: Option<HexColor>,
+    current_line: Option<HexColor>,
+    accent: Option<HexColor>,
     #[serde(rename = "editor_bg", alias = "editor_background")]
     editor_background: Option<HexColor>,
     #[serde(rename = "text_fg", alias = "foreground")]
@@ -137,8 +150,13 @@ struct ColorOverrides {
     _legacy_decoration_accent_3: Option<HexColor>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Palette {
+    pub syntax_literal: Color32,
+    pub syntax_comment: Color32,
+    pub syntax_string: Color32,
+    pub current_line: Color32,
+    pub accent: Color32,
     pub editor_background: Color32,
     pub foreground: Color32,
     pub selection: Color32,
@@ -155,18 +173,28 @@ impl Palette {
     fn defaults(theme: Theme) -> Self {
         match theme {
             Theme::Dark => Self {
-                editor_background: Color32::from_rgb(17, 19, 24),
-                foreground: Color32::from_rgb(214, 220, 232),
-                selection: Color32::from_rgb(55, 63, 80),
-                muted_surface: Color32::from_rgb(27, 30, 37),
-                terminal_background: Color32::from_rgb(23, 27, 34),
-                tabs_background: Color32::from_rgb(27, 30, 37),
-                active_tab_background: Color32::from_rgb(41, 45, 54),
-                tab_text_active: Color32::from_rgb(214, 220, 232),
-                tab_text_inactive: Color32::from_rgb(166, 175, 190),
-                status_background: Color32::from_rgb(32, 37, 46),
+                syntax_literal: Color32::from_rgb(222, 184, 131),
+                syntax_comment: Color32::from_rgb(156, 151, 140),
+                syntax_string: Color32::from_rgb(173, 190, 145),
+                current_line: Color32::from_rgb(42, 43, 41),
+                accent: Color32::from_rgb(222, 145, 109),
+                editor_background: Color32::from_rgb(34, 35, 34),
+                foreground: Color32::from_rgb(232, 223, 206),
+                selection: Color32::from_rgb(85, 69, 59),
+                muted_surface: Color32::from_rgb(46, 45, 43),
+                terminal_background: Color32::from_rgb(28, 29, 28),
+                tabs_background: Color32::from_rgb(41, 41, 39),
+                active_tab_background: Color32::from_rgb(52, 51, 47),
+                tab_text_active: Color32::from_rgb(243, 233, 215),
+                tab_text_inactive: Color32::from_rgb(183, 174, 161),
+                status_background: Color32::from_rgb(41, 41, 39),
             },
             Theme::Light => Self {
+                syntax_literal: Color32::from_rgb(133, 90, 40),
+                syntax_comment: Color32::from_rgb(89, 102, 116),
+                syntax_string: Color32::from_rgb(75, 112, 46),
+                current_line: Color32::from_rgb(232, 237, 243),
+                accent: Color32::from_rgb(155, 77, 40),
                 editor_background: Color32::from_rgb(246, 249, 253),
                 foreground: Color32::from_rgb(28, 43, 61),
                 selection: Color32::from_rgb(179, 214, 247),
@@ -186,6 +214,9 @@ impl Palette {
             Theme::Dark => egui::Visuals::dark(),
             Theme::Light => egui::Visuals::light(),
         };
+        visuals.text_cursor.stroke.color = self.accent;
+        visuals.selection.stroke.color = self.accent;
+        visuals.window_fill = self.muted_surface;
         visuals.panel_fill = self.editor_background;
         visuals.override_text_color = Some(self.foreground);
         visuals.selection.bg_fill = self.selection;
@@ -212,6 +243,21 @@ impl Colors {
         let mut palette = Palette::defaults(theme);
         if let Some(value) = overrides.editor_background {
             palette.editor_background = value.0;
+        }
+        if let Some(value) = overrides.accent {
+            palette.accent = value.0;
+        }
+        if let Some(value) = overrides.current_line {
+            palette.current_line = value.0;
+        }
+        if let Some(value) = overrides.syntax_string {
+            palette.syntax_string = value.0;
+        }
+        if let Some(value) = overrides.syntax_comment {
+            palette.syntax_comment = value.0;
+        }
+        if let Some(value) = overrides.syntax_literal {
+            palette.syntax_literal = value.0;
         }
         if let Some(value) = overrides.foreground {
             palette.foreground = value.0;
@@ -425,6 +471,14 @@ pub struct FileWatch {
 
 impl FileWatch {
     pub fn new(path: &Path, ctx: egui::Context) -> notify::Result<Self> {
+        Self::watch(path, ctx, false)
+    }
+
+    pub fn watch_settings(path: &Path, ctx: egui::Context) -> notify::Result<Self> {
+        Self::watch(path, ctx, true)
+    }
+
+    fn watch(path: &Path, ctx: egui::Context, include_theme: bool) -> notify::Result<Self> {
         let directory = path
             .parent()
             .ok_or_else(|| notify::Error::generic("File has no parent directory"))?;
@@ -434,10 +488,11 @@ impl FileWatch {
             let changed = result.map(|event| {
                 event.need_rescan()
                     || (!matches!(event.kind, EventKind::Access(_))
-                        && event
-                            .paths
-                            .iter()
-                            .any(|path| path.file_name() == filename.as_deref()))
+                        && event.paths.iter().any(|path| {
+                            path.file_name() == filename.as_deref()
+                                || (include_theme
+                                    && path.file_name() == Some(std::ffi::OsStr::new("theme.toml")))
+                        }))
             });
             match changed {
                 Ok(false) => return,
@@ -524,28 +579,54 @@ impl Config {
     }
 
     pub fn ensure_file(path: &Path, installation: &Path) -> io::Result<()> {
-        use std::io::Write;
-
-        if fs::symlink_metadata(path).is_ok() {
-            return Ok(());
-        }
         let directory = path
             .parent()
             .ok_or_else(|| io::Error::other("File has no parent directory"))?;
         fs::create_dir_all(directory)?;
         let legacy = installation.with_file_name("config.toml");
         let default = include_bytes!("../config.toml");
-        let contents = if legacy != path {
-            match fs::read(legacy) {
-                Ok(contents) => contents,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => default.to_vec(),
-                Err(error) => return Err(error),
+        let theme = path.with_file_name("theme.toml");
+        if !path.try_exists()? {
+            if legacy != path && legacy.try_exists()? {
+                Self::write_new(path, &fs::read(&legacy)?)?;
+                let adjacent_theme = legacy.with_file_name("theme.toml");
+                if adjacent_theme.try_exists()? {
+                    Self::write_new(&theme, &fs::read(adjacent_theme)?)?;
+                }
+            } else {
+                Self::write_new(path, default)?;
             }
-        } else {
-            default.to_vec()
-        };
+        }
+        if theme.try_exists()? {
+            return Ok(());
+        }
+        let settings: toml::Table =
+            toml::from_str(&fs::read_to_string(path)?).map_err(io::Error::other)?;
+        let mode = settings
+            .get("editor")
+            .and_then(|editor| editor.get("theme"))
+            .and_then(toml::Value::as_str);
+        if mode.is_some() || settings.contains_key("colors") {
+            let mode = mode.unwrap_or("dark");
+            let mut migrated = toml::Table::new();
+            migrated.insert("mode".into(), mode.into());
+            if let Some(colors) = settings.get("colors").and_then(|colors| colors.get(mode)) {
+                migrated.insert("palette".into(), colors.clone());
+            }
+            let source = toml::to_string_pretty(&migrated).map_err(io::Error::other)?;
+            toml::from_str::<ThemeFile>(&source).map_err(io::Error::other)?;
+            return Self::write_new(&theme, source.as_bytes());
+        }
+        Self::write_new(&theme, include_bytes!("../theme.toml"))
+    }
+
+    fn write_new(path: &Path, contents: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let directory = path
+            .parent()
+            .ok_or_else(|| io::Error::other("Missing parent directory"))?;
         let mut output = tempfile::NamedTempFile::new_in(directory)?;
-        output.write_all(&contents)?;
+        output.write_all(contents)?;
         match output.persist_noclobber(path) {
             Ok(_) => Ok(()),
             Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
@@ -554,12 +635,26 @@ impl Config {
     }
 
     pub fn load(path: &Path) -> Result<(Self, Bindings), String> {
-        let config = match fs::read_to_string(path) {
+        let mut config = match fs::read_to_string(path) {
             Ok(source) => {
                 Self::parse(&source).map_err(|error| format!("{}: {error}", path.display()))?
             }
             Err(error) => return Err(format!("{}: {}", path.display(), crate::io_message(&error))),
         };
+        let theme_path = path.with_file_name("theme.toml");
+        match fs::read_to_string(&theme_path) {
+            Ok(source) => {
+                let theme: ThemeFile = toml::from_str(&source)
+                    .map_err(|error| format!("{}: {error}", theme_path.display()))?;
+                config.editor.theme = theme.mode;
+                match theme.mode {
+                    Theme::Dark => config.colors.dark = theme.palette,
+                    Theme::Light => config.colors.light = theme.palette,
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", theme_path.display())),
+        }
         let bindings = config
             .bindings(path)
             .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -702,6 +797,33 @@ mod tests {
     }
 
     #[test]
+    fn imports_theme_and_preserves_legacy_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let installation = dir.path().join("synth");
+        let theme = path.with_file_name("theme.toml");
+        let original = "[editor]\ntheme='light'\n[colors.light]\ntext_fg='#123456'";
+        fs::write(&path, original).unwrap();
+        Config::ensure_file(&path, &installation).unwrap();
+        assert!(theme.is_file());
+        assert_eq!(
+            Config::load(&path).unwrap().0.palette().foreground,
+            Color32::from_rgb(18, 52, 86)
+        );
+        fs::write(&theme, "mode='dark'\n[palette]\naccent='#123456'").unwrap();
+        Config::ensure_file(&path, &installation).unwrap();
+        let palette = Config::load(&path).unwrap().0.palette();
+        assert_eq!(palette.accent, Color32::from_rgb(18, 52, 86));
+        assert_eq!(
+            palette.foreground,
+            Palette::defaults(Theme::Dark).foreground
+        );
+        fs::write(&theme, "accent='wrong'").unwrap();
+        assert!(Config::load(&path).err().unwrap().contains("theme.toml"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
     fn example_uses_default_shortcut_and_panel() {
         let config = Config::parse(include_str!("../config.toml")).unwrap();
         assert!(matches!(config.terminal.side, Side::Right));
@@ -714,10 +836,10 @@ mod tests {
         assert!(config.editor.wrap_lines);
         assert!(config.editor.recover_unsaved_documents);
         assert!(!config.interface.enable_search_and_replace);
-        assert!(!config.interface.show_tabs);
-        assert!(!config.interface.show_line_numbers);
-        assert!(!config.interface.syntax_highlighting);
-        assert!(!config.interface.show_status_bar);
+        assert!(config.interface.show_tabs);
+        assert!(config.interface.show_line_numbers);
+        assert!(config.interface.syntax_highlighting);
+        assert!(config.interface.show_status_bar);
         let bindings = config.bindings(Path::new("/tmp/config.toml")).unwrap();
         assert!(bindings.iter().any(|(shortcut, command)| *shortcut
             == egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Escape)
@@ -728,16 +850,29 @@ mod tests {
     }
 
     #[test]
-    fn first_launch_materializes_bindings_and_leaves_user_changes_intact() {
+    fn first_launch_creates_config_and_theme_and_preserves_user_changes() {
         let workspace = tempfile::tempdir().unwrap();
         let installation = workspace.path().join("synth");
         let path = workspace.path().join("settings/config.toml");
+        let theme = path.with_file_name("theme.toml");
         assert!(Config::load(&path).is_err());
 
         Config::ensure_file(&path, &installation).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            include_str!("../config.toml")
+        );
+        assert_eq!(
+            fs::read_to_string(&theme).unwrap(),
+            include_str!("../theme.toml")
+        );
         assert_eq!(Config::load(&path).unwrap().1.len(), 17);
+
+        let custom_theme = "mode = 'light'";
+        fs::write(&theme, custom_theme).unwrap();
         fs::write(&path, "[keybindings]").unwrap();
         Config::ensure_file(&path, &installation).unwrap();
+        assert_eq!(fs::read_to_string(theme).unwrap(), custom_theme);
         assert!(Config::load(&path).unwrap().1.is_empty());
     }
 
@@ -824,10 +959,10 @@ mod tests {
     fn dark_palette_matches_tab_reference() {
         let dark = Palette::defaults(Theme::Dark);
         let light = Palette::defaults(Theme::Light);
-        assert_eq!(dark.tabs_background, Color32::from_rgb(27, 30, 37));
-        assert_eq!(dark.active_tab_background, Color32::from_rgb(41, 45, 54));
-        assert_eq!(dark.terminal_background, Color32::from_rgb(23, 27, 34));
-        assert_eq!(dark.status_background, Color32::from_rgb(32, 37, 46));
+        assert_eq!(dark.tabs_background, Color32::from_rgb(41, 41, 39));
+        assert_eq!(dark.active_tab_background, Color32::from_rgb(52, 51, 47));
+        assert_eq!(dark.terminal_background, Color32::from_rgb(28, 29, 28));
+        assert_eq!(dark.status_background, Color32::from_rgb(41, 41, 39));
         assert_ne!(light.tabs_background, dark.tabs_background);
     }
 

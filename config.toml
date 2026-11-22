@@ -1,16 +1,17 @@
 # Save this file to apply changes. The shell and its arguments apply to the next terminal session.
 
+# To import a theme, replace theme.toml beside this file.
+
 [editor]
-theme = "dark" # dark, light
 font_size = 16.0
 wrap_lines = true # wrap to the editor width, false enables horizontal scrolling
 recover_unsaved_documents = true # keep local drafts of unsaved edits and offer recovery after a crash
 
 [interface]
-show_tabs = false
-show_line_numbers = false
-syntax_highlighting = false
-show_status_bar = false
+show_tabs = true
+show_line_numbers = true
+syntax_highlighting = true
+show_status_bar = true
 enable_search_and_replace = false # enable the search and replace bar (Ctrl+F)
 show_external_file_changes = true # show a reload prompt when the active file changes on disk
 tab_height = 36.0
@@ -19,33 +20,9 @@ tab_font_size = 12.0
 tab_min_width = 96.0
 editor_padding = 18
 
-[colors.dark]
-editor_bg = "#111318"
-text_fg = "#D6DCE8"
-selection_bg = "#373F50"
-surface_bg = "#1B1E25"
-terminal_bg = "#171B22"
-tab_bar_bg = "#1B1E25"
-tab_active_bg = "#292D36"
-tab_active_fg = "#D6DCE8"
-tab_inactive_fg = "#A6AFBE"
-status_bar_bg = "#20252E"
-
-[colors.light]
-editor_bg = "#F6F9FD"
-text_fg = "#1C2B3D"
-selection_bg = "#B3D6F7"
-surface_bg = "#EAEFF6"
-terminal_bg = "#EAF1F9"
-tab_bar_bg = "#E6EBF3"
-tab_active_bg = "#FFFFFF"
-tab_active_fg = "#1C2B3D"
-tab_inactive_fg = "#5C6776"
-status_bar_bg = "#EAEFF6"
-
 [terminal]
 side = "right" # right, left
-width_fraction = 0.44 # fraction of the window, from 0.15 to 0.85
+width_fraction = 0.32 # fraction of the window, from 0.15 to 0.85
 command_target = "window" # window or shared, applies to the next terminal session
 font_size = 14.0
 # shell = "pwsh" # omit for the platform default
