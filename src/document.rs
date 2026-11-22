@@ -1,11 +1,18 @@
 use std::{
     fs,
+    hash::{DefaultHasher, Hash, Hasher},
     io::{self, Write},
     ops::Range,
     path::{Path, PathBuf},
 };
 
 use crate::command::Reply;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskChange {
+    Modified(u64),
+    Unavailable,
+}
 
 pub struct Document {
     pub id: u64,
@@ -14,6 +21,7 @@ pub struct Document {
     pub cursor: usize,
     pub selection: Option<Range<usize>>,
     saved: String,
+    pub dismissed_disk_change: Option<DiskChange>,
     dirty: bool,
     bom: bool,
     search: Option<(String, usize)>,
@@ -30,6 +38,7 @@ impl Document {
             cursor: 0,
             selection: None,
             saved: String::new(),
+            dismissed_disk_change: None,
             dirty: false,
             bom: false,
             search: None,
@@ -115,6 +124,23 @@ impl Document {
         )
     }
 
+    pub fn disk_change(&self) -> Option<DiskChange> {
+        let path = self.path.as_ref()?;
+        if !path.is_file() {
+            return Some(DiskChange::Unavailable);
+        }
+        let Ok((text, bom)) = read_file(path) else {
+            return Some(DiskChange::Unavailable);
+        };
+        if text == self.saved && bom == self.bom {
+            return None;
+        }
+        let mut hash = DefaultHasher::new();
+        text.hash(&mut hash);
+        bom.hash(&mut hash);
+        Some(DiskChange::Modified(hash.finish()))
+    }
+
     pub fn save(&mut self, destination: Option<&Path>) -> Reply {
         let target = match destination {
             Some(destination) => {
@@ -164,6 +190,7 @@ impl Document {
         .map_err(|error| file_error(&target, error.error))?;
 
         self.saved.clone_from(&self.text);
+        self.dismissed_disk_change = None;
         self.dirty = false;
         let message = format!("Saved {}", target.display());
         self.path = Some(target);
@@ -288,6 +315,12 @@ impl Documents {
             .path
             .as_ref()
             .ok_or("This document has no file to reload")?;
+        if !path.is_file() {
+            return Err(format!(
+                "{} is unavailable or is not a regular file",
+                path.display()
+            ));
+        }
         let (text, bom) = read_file(path)?;
         let reply = format!("Reloaded {}", path.display());
         let cursor = document.cursor;
@@ -296,6 +329,7 @@ impl Documents {
         document.text_changed();
         document.bom = bom;
         document.search = None;
+        document.dismissed_disk_change = None;
         document.move_cursor(cursor.min(document.char_count));
         document.id = self.next_id;
         self.next_id += 1;
@@ -352,6 +386,27 @@ impl Documents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_changes_compare_against_saved_content_with_bom() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("original.txt");
+        fs::write(&path, "initial").unwrap();
+        let mut documents = Documents::default();
+        documents.open(&path).unwrap();
+        let document = documents.current_mut();
+        document.text.push_str(" edit");
+        document.text_changed();
+        assert_eq!(document.disk_change(), None);
+
+        fs::write(&path, "\u{feff}initial").unwrap();
+        let bom_change = document.disk_change();
+        assert!(matches!(bom_change, Some(DiskChange::Modified(_))));
+        fs::write(&path, "initial edit").unwrap();
+        assert_ne!(document.disk_change(), bom_change);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(document.disk_change(), Some(DiskChange::Unavailable));
+    }
 
     #[test]
     fn save_preserves_bom_and_refuses_to_overwrite_external_changes() {

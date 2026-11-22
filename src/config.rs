@@ -304,6 +304,7 @@ pub struct Interface {
     pub syntax_highlighting: bool,
     #[serde(alias = "enable_status_bar")]
     pub show_status_bar: bool,
+    pub show_external_file_changes: bool,
     pub tab_height: f32,
     pub tab_max_chars: usize,
     pub tab_font_size: f32,
@@ -320,6 +321,7 @@ impl Default for Interface {
             show_line_numbers: false,
             syntax_highlighting: false,
             show_status_bar: false,
+            show_external_file_changes: true,
             tab_height: 36.0,
             tab_max_chars: 28,
             tab_font_size: 12.0,
@@ -377,17 +379,17 @@ impl Default for Animations {
     }
 }
 
-pub struct ConfigWatch {
+pub struct FileWatch {
     _watcher: RecommendedWatcher,
     changes: mpsc::Receiver<notify::Result<()>>,
     next_reload: Option<Instant>,
 }
 
-impl ConfigWatch {
+impl FileWatch {
     pub fn new(path: &Path, ctx: egui::Context) -> notify::Result<Self> {
         let directory = path
             .parent()
-            .ok_or_else(|| notify::Error::generic("Config has no parent directory"))?;
+            .ok_or_else(|| notify::Error::generic("File has no parent directory"))?;
         let filename = path.file_name().map(ToOwned::to_owned);
         let (sender, changes) = mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| {
@@ -418,10 +420,10 @@ impl ConfigWatch {
         })
     }
 
-    pub fn ready(&mut self, ctx: &egui::Context) -> Result<bool, String> {
+    pub fn ready(&mut self, ctx: &egui::Context) -> notify::Result<bool> {
         let now = Instant::now();
         for change in self.changes.try_iter() {
-            change.map_err(|error| format!("Config watcher: {error}"))?;
+            change?;
             self.next_reload = Some(now + Duration::from_millis(120));
         }
         if let Some(deadline) = self.next_reload {
@@ -491,7 +493,7 @@ impl Config {
         }
         let directory = path
             .parent()
-            .ok_or_else(|| io::Error::other("Config has no parent directory"))?;
+            .ok_or_else(|| io::Error::other("File has no parent directory"))?;
         fs::create_dir_all(directory)?;
         let legacy = installation.with_file_name("config.toml");
         let default = include_bytes!("../config.toml");
@@ -536,7 +538,7 @@ impl Config {
                 .map(|key| (key, Command::ToggleTerminal))
                 .collect());
         };
-        let directory = path.parent().ok_or("Config has no parent directory")?;
+        let directory = path.parent().ok_or("File has no parent directory")?;
         let mut bindings = Vec::new();
         for (key, text) in configured {
             let shortcut = parse_shortcut(key)?;

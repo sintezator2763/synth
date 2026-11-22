@@ -9,6 +9,7 @@ show_tabs = false
 show_line_numbers = false
 syntax_highlighting = false
 show_status_bar = false
+show_external_file_changes = true # show a reload prompt when the active file changes on disk
 tab_height = 36.0
 tab_max_chars = 28
 tab_font_size = 12.0

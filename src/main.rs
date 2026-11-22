@@ -18,8 +18,8 @@ use std::{
 };
 
 use command::{Command, Reply, Request};
-use config::{Bindings, Config, ConfigWatch, Side};
-use document::Documents;
+use config::{Bindings, Config, FileWatch, Side};
+use document::{DiskChange, Documents};
 use editor::Editor;
 use eframe::egui::{self, FontId};
 use terminal::Terminal;
@@ -35,11 +35,19 @@ enum Confirmation {
     Close(HashMap<u64, String>),
 }
 
+struct WatchedDocument {
+    id: u64,
+    path: PathBuf,
+    watcher: Option<FileWatch>,
+    change: Option<DiskChange>,
+}
+
 struct Synth {
     config: Config,
     config_path: PathBuf,
     bindings: Bindings,
-    watcher: Option<ConfigWatch>,
+    watcher: Option<FileWatch>,
+    watched_document: Option<WatchedDocument>,
     commands: mpsc::Receiver<Request>,
     documents: Documents,
     editor: Editor,
@@ -66,7 +74,7 @@ impl Synth {
                     io_message(&error)
                 )
             });
-        let (watcher, watch_error) = match ConfigWatch::new(&config_path, ctx.clone()) {
+        let (watcher, watch_error) = match FileWatch::new(&config_path, ctx.clone()) {
             Ok(watcher) => (Some(watcher), None),
             Err(error) => (None, Some(format!("Config watcher: {error}"))),
         };
@@ -76,6 +84,7 @@ impl Synth {
             config_path,
             bindings: Vec::new(),
             watcher,
+            watched_document: None,
             commands,
             documents: Documents::default(),
             editor: Editor::default(),
@@ -190,6 +199,46 @@ impl Synth {
             self.pending_focus = Some(Focus::Editor);
         }
         reply
+    }
+
+    fn check_document_on_disk(&mut self, ctx: &egui::Context) {
+        let document = self.documents.current_mut();
+        let Some(path) = document
+            .path
+            .as_ref()
+            .filter(|_| self.config.interface.show_external_file_changes)
+        else {
+            self.watched_document = None;
+            return;
+        };
+        if let Some(watched) = &mut self.watched_document
+            && watched.id == document.id
+            && watched.path == *path
+        {
+            let Some(watcher) = &mut watched.watcher else {
+                return;
+            };
+            match watcher.ready(ctx) {
+                Ok(false) => {}
+                Ok(true) => {
+                    watched.change = document.disk_change();
+                    if watched.change.is_none() {
+                        document.dismissed_disk_change = None;
+                    }
+                }
+                Err(error) => self.notice = Some(format!("File watcher: {error}")),
+            }
+            return;
+        }
+        let watcher = FileWatch::new(path, ctx.clone())
+            .map_err(|error| self.notice = Some(format!("File watcher: {error}")))
+            .ok();
+        self.watched_document = Some(WatchedDocument {
+            id: document.id,
+            path: path.clone(),
+            watcher,
+            change: document.disk_change(),
+        });
     }
 
     fn reload_document(&mut self, ctx: &egui::Context) -> Reply {
@@ -449,7 +498,7 @@ impl eframe::App for Synth {
                     let _ = self.reload_config(ctx);
                 }
                 Ok(false) => {}
-                Err(error) => self.config_error = Some(error),
+                Err(error) => self.config_error = Some(format!("Config watcher: {error}")),
             }
         }
         while let Ok(request) = self.commands.try_recv() {
@@ -467,6 +516,7 @@ impl eframe::App for Synth {
             self.documents.active = index;
             self.pending_focus = Some(Focus::Editor);
         }
+        self.check_document_on_disk(ctx);
         editor::status(ctx, self.documents.current(), &self.config);
         if self.pending_focus == Some(Focus::Editor) {
             let id = Editor::id(self.documents.current());
@@ -486,10 +536,38 @@ impl eframe::App for Synth {
                 for error in [self.config_error.as_ref(), notice].into_iter().flatten() {
                     ui.colored_label(ui.visuals().error_fg_color, error);
                 }
+                let mut reload = false;
                 ui.add_enabled_ui(!modal_open, |ui| {
-                    self.editor
-                        .show(ui, self.documents.current_mut(), &self.config);
+                    let document = self.documents.current_mut();
+                    if let Some(change) = self
+                        .watched_document
+                        .as_ref()
+                        .and_then(|watched| watched.change)
+                        && document.dismissed_disk_change != Some(change)
+                    {
+                        let message = match change {
+                            DiskChange::Modified(_) => {
+                                format!("{} changed on disk.", document.name())
+                            }
+                            DiskChange::Unavailable => {
+                                format!("{} is unavailable on disk.", document.name())
+                            }
+                        };
+                        ui.label(message);
+                        ui.horizontal_wrapped(|ui| {
+                            reload = ui.button("Reload from disk").clicked();
+                            if ui.button("Keep editing").clicked() {
+                                document.dismissed_disk_change = Some(change);
+                                self.pending_focus = Some(Focus::Editor);
+                            }
+                        });
+                        ui.separator();
+                    }
+                    self.editor.show(ui, document, &self.config);
                 });
+                if reload && let Err(error) = self.execute(ctx, Command::Reload) {
+                    self.notice = Some(error);
+                }
             });
         self.editor.retain_documents(&self.documents);
         if !self.closing
