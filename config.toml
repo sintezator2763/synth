@@ -11,7 +11,7 @@ show_tabs = false
 show_line_numbers = false
 syntax_highlighting = false
 show_status_bar = false
-enable_search_and_replace = false # enable the search and replace bar (Ctrl+F or Cmd+F)
+enable_search_and_replace = false # enable the search and replace bar (Ctrl+F)
 show_external_file_changes = true # show a reload prompt when the active file changes on disk
 tab_height = 36.0
 tab_max_chars = 28
@@ -55,12 +55,18 @@ args = [] # arguments for a custom shell
 
 # Run synth help for every command available to bind.
 [keybinds]
-"Command+F" = "synth search toggle" # Ctrl+F on Windows/Linux, Cmd+F on macOS
+"Ctrl+F" = "synth search toggle"
 # For a list, the first action available in the current view wins.
 Esc = ["synth dialog cancel", "synth search close", "synth terminal toggle-edit"]
 Enter = "synth search next" # only while the search field has focus
 "Ctrl+Shift+C" = "synth terminal copy" # only while the terminal has focus
 "Shift+Esc" = "synth terminal hide" # hide the panel even when the terminal has focus
+# Scale terminal text when it has focus, otherwise scale the whole interface.
+"Ctrl+Equals" = ["synth terminal zoom in", "synth zoom in"]
+"Ctrl+Plus" = ["synth terminal zoom in", "synth zoom in"]
+"Ctrl+Shift+Plus" = ["synth terminal zoom in", "synth zoom in"]
+"Ctrl+Minus" = ["synth terminal zoom out", "synth zoom out"]
+"Ctrl+0" = ["synth terminal zoom reset", "synth zoom reset"]
 # "Ctrl+Alt+F" = "synth focus toggle"
 # "Ctrl+S" = "synth save"
 # "Ctrl+N" = "synth new"

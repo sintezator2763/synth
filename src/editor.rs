@@ -364,7 +364,10 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
             let encoding = document.encoding();
             let unit = if lines == 1 { "line" } else { "lines" };
             bar.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(format!("{encoding}  |  {lines} {unit}  |  {line}:{column}")).monospace());
+                ui.label(
+                    RichText::new(format!("{encoding}  |  {lines} {unit}  |  {line}:{column}"))
+                        .monospace(),
+                );
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add(egui::Label::new(RichText::new(label).monospace()).truncate())
                         .on_hover_text(document.display_path());
@@ -573,8 +576,7 @@ impl SearchBar {
 
     fn refresh_after_edit(&mut self, document: &Document) {
         self.update_matches(document);
-        let byte = document.text.char_indices().nth(document.cursor)
-            .map_or(document.text.len(), |(byte, _)| byte);
+        let byte = document.byte_at_char(document.cursor);
         self.current = self.matches.partition_point(|found| found.end < byte);
         if self.current == self.matches.len() {
             self.current = 0;
@@ -637,10 +639,12 @@ impl SearchBar {
                 format!("{} of {count}", self.current + 1)
             });
             previous = ui
-                .add_enabled(count > 0, egui::Button::new("<")).on_hover_text("Previous match")
+                .add_enabled(count > 0, egui::Button::new("<"))
+                .on_hover_text("Previous match")
                 .clicked();
             next |= ui
-                .add_enabled(count > 0, egui::Button::new(">")).on_hover_text("Next match")
+                .add_enabled(count > 0, egui::Button::new(">"))
+                .on_hover_text("Next match")
                 .clicked();
             ui.toggle_value(&mut self.show_replacement, "Replace…");
             if ui.button("×").on_hover_text("Close search").clicked() {
@@ -709,13 +713,70 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "manual large-document timing"]
+    fn large_document_edit_latency() {
+        use std::{hint::black_box, time::Instant};
+
+        let source = "let token = \"猫\";\n".repeat(100_000);
+        for at_end in [false, true] {
+            for search_open in [false, true] {
+                let mut docs = Documents::default();
+                let doc = docs.current_mut();
+                doc.text.clone_from(&source);
+                doc.text_changed();
+                let mut bar = SearchBar {
+                    open: search_open,
+                    query: "token".into(),
+                    ..Default::default()
+                };
+                if search_open {
+                    bar.refresh_after_edit(doc);
+                }
+                let byte = if at_end { source.len() } else { 0 };
+                let cursor = if at_end { source.chars().count() } else { 0 };
+                let mut times = Vec::new();
+                for sample in 0..35 {
+                    let start = Instant::now();
+                    doc.text.insert(byte, 'x');
+                    doc.cursor = cursor + 1;
+                    doc.text_changed();
+                    let indexed = start.elapsed();
+                    if search_open {
+                        bar.refresh_after_edit(doc);
+                        assert_eq!(bar.matches.len(), 100_000);
+                    }
+                    black_box((&*doc, &bar));
+                    let elapsed = start.elapsed();
+                    if sample >= 4 {
+                        times.push((elapsed, indexed));
+                    }
+                    doc.text.remove(byte);
+                    doc.cursor = cursor;
+                    doc.text_changed();
+                    if search_open {
+                        bar.refresh_after_edit(doc);
+                    }
+                }
+                times.sort_unstable();
+                let (total, index) = times[times.len() / 2];
+                println!(
+                    "end={at_end} search={search_open} median={total:?} edit_and_index={index:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn refreshing_search_preserves_the_editing_cursor() {
         let mut docs = Documents::default();
         let doc = docs.current_mut();
         doc.text = "cat cat\nxsecond".into();
         doc.text_changed();
         doc.cursor = 9;
-        let mut bar = SearchBar { query: "cat".into(), ..Default::default() };
+        let mut bar = SearchBar {
+            query: "cat".into(),
+            ..Default::default()
+        };
         bar.refresh_after_edit(doc);
         assert_eq!(bar.matches.len(), 2);
         assert_eq!(doc.cursor, 9);

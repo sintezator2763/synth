@@ -18,7 +18,7 @@ use std::{
     sync::mpsc,
 };
 
-use command::{Command, Reply, Request};
+use command::{Command, Reply, Request, Zoom};
 use config::{Bindings, Config, FileWatch, Side};
 use document::{DiskChange, Documents};
 use editor::{Editor, SearchBar};
@@ -59,6 +59,7 @@ struct Synth {
     recovery_error: Option<String>,
     terminal: Option<Terminal>,
     terminal_open: bool,
+    terminal_font_override: Option<f32>,
     terminal_error: Option<String>,
     config_error: Option<String>,
     notice: Option<String>,
@@ -71,6 +72,7 @@ struct Synth {
 
 impl Synth {
     fn new(ctx: &egui::Context, installation: PathBuf, config_path: PathBuf) -> Self {
+        ctx.options_mut(|options| options.zoom_with_keyboard = false);
         let setup_error = Config::ensure_file(&config_path, &installation)
             .err()
             .map(|error| {
@@ -99,6 +101,7 @@ impl Synth {
             recovery_error: None,
             terminal: None,
             terminal_open: false,
+            terminal_font_override: None,
             terminal_error: None,
             config_error: None,
             notice: setup_error.or(watch_error),
@@ -118,6 +121,9 @@ impl Synth {
         let result = Config::load(&self.config_path).map(|(config, bindings)| {
             ctx.set_visuals(config.palette().visuals(config.editor.theme));
             self.bindings = bindings;
+            if self.config.terminal.font_size != config.terminal.font_size {
+                self.terminal_font_override = None;
+            }
             self.config = config;
             if !self.config.interface.enable_search_and_replace {
                 self.search_bar.close();
@@ -174,7 +180,7 @@ impl Synth {
             self.pending_focus = Some(Focus::Editor);
             return Ok(String::new());
         }
-        if self.confirmation.is_some() {
+        if self.confirmation.is_some() && !matches!(command, Command::InterfaceZoom(_)) {
             return Err("Finish the confirmation in the Synth window first".into());
         }
         self.notice = None;
@@ -254,9 +260,30 @@ impl Synth {
                 Ok(String::new())
             }
             Command::CopyTerminalSelection => {
-                let terminal = self.terminal.as_ref().filter(|_| self.terminal_open)
+                let terminal = self
+                    .terminal
+                    .as_ref()
+                    .filter(|_| self.terminal_open)
                     .ok_or("No terminal panel is open")?;
                 terminal.copy_selection(ctx);
+                Ok(String::new())
+            }
+            Command::TerminalZoom(zoom) => {
+                let size = self.terminal_font_size();
+                let range = config::FONT_SIZE_RANGE;
+                self.terminal_font_override = match zoom {
+                    Zoom::In => Some((size + 1.0).min(*range.end())),
+                    Zoom::Out => Some((size - 1.0).max(*range.start())),
+                    Zoom::Reset => None,
+                };
+                Ok(format!("Terminal font size: {}", self.terminal_font_size()))
+            }
+            Command::InterfaceZoom(zoom) => {
+                match zoom {
+                    Zoom::In => egui::gui_zoom::zoom_in(ctx),
+                    Zoom::Out => egui::gui_zoom::zoom_out(ctx),
+                    Zoom::Reset => ctx.set_zoom_factor(1.0),
+                }
                 Ok(String::new())
             }
             Command::HideTerminal => {
@@ -357,7 +384,9 @@ impl Synth {
                     ui.add(egui::TextEdit::singleline(path).hint_text("Destination file path"));
                     ui.horizontal(|ui| {
                         canceled = ui.button("Cancel").clicked();
-                        accepted = ui.add_enabled(!path.is_empty(), egui::Button::new("Save copy")).clicked();
+                        accepted = ui
+                            .add_enabled(!path.is_empty(), egui::Button::new("Save copy"))
+                            .clicked();
                     });
                 }
                 Confirmation::Reload(_) => {
@@ -415,7 +444,8 @@ impl Synth {
             let result = match &confirmation {
                 Confirmation::SaveCopy(path) => std::path::absolute(path)
                     .map_err(|error| io_message(&error))
-                    .and_then(|destination| self.documents.save(Some(&destination))).map(|_| ()),
+                    .and_then(|destination| self.documents.save(Some(&destination)))
+                    .map(|_| ()),
                 Confirmation::Reload(id) => self.documents.reload(*id).map(|_| ()),
                 Confirmation::Close(paths) => self.save_changed(paths),
             };
@@ -454,7 +484,8 @@ impl Synth {
             .iter_mut()
             .filter(|document| document.dirty())
         {
-            let destination = paths.get(&document.id)
+            let destination = paths
+                .get(&document.id)
                 .map(std::path::absolute)
                 .transpose()
                 .map_err(|error| io_message(&error))?;
@@ -476,14 +507,16 @@ impl Synth {
         let dialog_open = self.confirmation.is_some();
         let available = |command: &Command| {
             if dialog_open {
-                return matches!(command, Command::CancelDialog);
+                return matches!(command, Command::CancelDialog | Command::InterfaceZoom(_));
             }
             match command {
                 Command::CancelDialog => false,
-                Command::ToggleSearch => self.config.interface.enable_search_and_replace && !terminal_focused,
+                Command::ToggleSearch => {
+                    self.config.interface.enable_search_and_replace && !terminal_focused
+                }
                 Command::CloseSearch => search_open && !terminal_focused,
                 Command::SearchNext => search_open && query_focused && !terminal_focused,
-                Command::CopyTerminalSelection => terminal_focused,
+                Command::CopyTerminalSelection | Command::TerminalZoom(_) => terminal_focused,
                 Command::ToggleEditorTerminal => !terminal_focused,
                 _ => true,
             }
@@ -511,13 +544,18 @@ impl Synth {
                     if *pressed && !*repeat {
                         commands.push(command.clone());
                     }
-                    discard_text = *pressed && key.name().len() == 1;
+                    discard_text = *pressed && terminal::printable_key(*key).is_some();
                     return false;
                 }
                 true
             });
             commands
         })
+    }
+
+    fn terminal_font_size(&self) -> f32 {
+        self.terminal_font_override
+            .unwrap_or(self.config.terminal.font_size)
     }
 
     fn terminal_panel(&mut self, ctx: &egui::Context) {
@@ -533,7 +571,9 @@ impl Synth {
                 let palette = self.config.palette();
                 if terminal.process_events(ctx, palette.foreground, palette.terminal_background) {
                     self.terminal = None;
-                    if self.terminal_open { self.toggle_terminal(); }
+                    if self.terminal_open {
+                        self.toggle_terminal();
+                    }
                 }
             }
             return;
@@ -545,6 +585,7 @@ impl Synth {
             Side::Left => egui::SidePanel::left("terminal"),
             Side::Right => egui::SidePanel::right("terminal"),
         };
+        let font_size = self.terminal_font_size();
         let background = self.config.palette().terminal_background;
         panel
             .resizable(false)
@@ -567,7 +608,7 @@ impl Synth {
                     }
                 }
                 if let Some(terminal) = &mut self.terminal {
-                    terminal.set_font_size(self.config.terminal.font_size);
+                    terminal.set_font_size(font_size);
                     let foreground = ui.visuals().text_color();
                     let exited = terminal.show(
                         ui,
@@ -588,7 +629,7 @@ impl Synth {
                         rect.min,
                         egui::Align2::LEFT_TOP,
                         error,
-                        FontId::monospace(self.config.terminal.font_size),
+                        FontId::monospace(font_size),
                         ui.visuals().error_fg_color,
                     );
                     if !self.terminal_open {
@@ -644,7 +685,10 @@ impl eframe::App for Synth {
         }
         self.terminal_panel(ctx);
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(&ctx.style()).inner_margin(self.config.interface.editor_padding))
+            .frame(
+                egui::Frame::central_panel(&ctx.style())
+                    .inner_margin(self.config.interface.editor_padding),
+            )
             .show(ctx, |ui| {
                 let modal_open = self.confirmation.is_some();
                 let notice = if modal_open {
@@ -666,15 +710,21 @@ impl eframe::App for Synth {
                 ui.add_enabled_ui(!modal_open, |ui| {
                     if let Some(recovery) = &mut self.recovery {
                         for warning in &recovery.warnings {
-                            ui.colored_label(ui.visuals().error_fg_color, format!("Unreadable draft: {warning}"));
+                            ui.colored_label(
+                                ui.visuals().error_fg_color,
+                                format!("Unreadable draft: {warning}"),
+                            );
                         }
                         if recovery.choices().next().is_some() {
                             ui.label("Unsaved drafts from previous sessions");
-                            egui::ScrollArea::vertical().id_salt("draft choices").max_height(120.0).show(ui, |ui| {
-                                for (label, selected) in recovery.choices() {
-                                    ui.checkbox(selected, label);
-                                }
-                            });
+                            egui::ScrollArea::vertical()
+                                .id_salt("draft choices")
+                                .max_height(120.0)
+                                .show(ui, |ui| {
+                                    for (label, selected) in recovery.choices() {
+                                        ui.checkbox(selected, label);
+                                    }
+                                });
                             let selected = recovery.choices().any(|(_, selected)| *selected);
                             ui.add_enabled_ui(selected, |ui| {
                                 ui.horizontal_wrapped(|ui| {
@@ -710,13 +760,11 @@ impl eframe::App for Synth {
                         };
                         ui.label(message);
                         ui.horizontal_wrapped(|ui| {
-                            match change {
-                                DiskChange::Modified(_) => reload = ui.button("Reload from disk").clicked(),
-                                DiskChange::Unavailable => {
-                                    if ui.button("Save a copy…").clicked() {
-                                        self.confirmation = Some(Confirmation::SaveCopy(String::new()));
-                                    }
-                                }
+                            if matches!(change, DiskChange::Modified(_)) {
+                                reload = ui.button("Reload from disk").clicked();
+                            }
+                            if ui.button("Save a copy…").clicked() {
+                                self.confirmation = Some(Confirmation::SaveCopy(String::new()));
                             }
                             if ui.button("Keep editing").clicked() {
                                 document.dismissed_disk_change = Some(change);
@@ -726,7 +774,8 @@ impl eframe::App for Synth {
                         ui.separator();
                     }
                     self.search_bar.show(ui, document);
-                    self.editor.show(ui, document, &self.config, self.search_bar.highlight());
+                    self.editor
+                        .show(ui, document, &self.config, self.search_bar.highlight());
                 });
                 if reload && let Err(error) = self.execute(ctx, Command::Reload) {
                     self.notice = Some(error);

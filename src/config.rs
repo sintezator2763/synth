@@ -16,6 +16,8 @@ use crate::{
     cursor_trail,
 };
 
+pub const FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 8.0..=48.0;
+
 pub type Bindings = Vec<(egui::KeyboardShortcut, Command)>;
 
 #[derive(Default, Deserialize)]
@@ -85,7 +87,7 @@ impl<'de> Deserialize<'de> for HexColor {
         let value = String::deserialize(deserializer)?;
         let hex = value
             .strip_prefix('#')
-            .filter(|hex| hex.len() == 6)
+            .filter(|hex| hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .ok_or_else(|| serde::de::Error::custom("Expected a color in #RRGGBB format"))?;
         let rgb = u32::from_str_radix(hex, 16)
             .map_err(|_| serde::de::Error::custom("Expected a color in #RRGGBB format"))?;
@@ -300,7 +302,11 @@ fn bare_escape(shortcut: egui::KeyboardShortcut) -> bool {
 }
 
 fn legacy_escape_commands() -> [Command; 3] {
-    [Command::CancelDialog, Command::CloseSearch, Command::ToggleEditorTerminal]
+    [
+        Command::CancelDialog,
+        Command::CloseSearch,
+        Command::ToggleEditorTerminal,
+    ]
 }
 
 fn parse_shortcut(text: &str) -> Result<egui::KeyboardShortcut, String> {
@@ -552,7 +558,6 @@ impl Config {
             Ok(source) => {
                 Self::parse(&source).map_err(|error| format!("{}: {error}", path.display()))?
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
             Err(error) => return Err(format!("{}: {}", path.display(), crate::io_message(&error))),
         };
         let bindings = config
@@ -590,14 +595,24 @@ impl Config {
             }
             for text in binding.commands() {
                 let words = shell_words::split(text).map_err(|error| format!("{key}: {error}"))?;
-                let (program, args) = words.split_first().ok_or_else(|| format!("{key}: Expected synth command"))?;
+                let (program, args) = words
+                    .split_first()
+                    .ok_or_else(|| format!("{key}: Expected synth command"))?;
                 if program != "synth" {
                     return Err(format!("{key}: Expected synth command"));
                 }
                 let args = args.iter().map(Into::into).collect::<Vec<_>>();
-                let command = Command::parse(&args, directory).map_err(|error| format!("{key}: {error}"))?;
-                if self.keybindings.is_some() && bare_escape(shortcut) && matches!(command, Command::ToggleTerminal) {
-                    bindings.extend(legacy_escape_commands().into_iter().map(|command| (shortcut, command)));
+                let command =
+                    Command::parse(&args, directory).map_err(|error| format!("{key}: {error}"))?;
+                if self.keybindings.is_some()
+                    && bare_escape(shortcut)
+                    && matches!(command, Command::ToggleTerminal)
+                {
+                    bindings.extend(
+                        legacy_escape_commands()
+                            .into_iter()
+                            .map(|command| (shortcut, command)),
+                    );
                 } else {
                     bindings.push((shortcut, command));
                 }
@@ -631,8 +646,8 @@ impl Config {
 
     fn parse(source: &str) -> Result<Self, String> {
         let config: Self = toml::from_str(source).map_err(|error| error.to_string())?;
-        if !(8.0..=48.0).contains(&config.editor.font_size)
-            || !(8.0..=48.0).contains(&config.terminal.font_size)
+        if !FONT_SIZE_RANGE.contains(&config.editor.font_size)
+            || !FONT_SIZE_RANGE.contains(&config.terminal.font_size)
         {
             return Err("Font sizes must be between 8 and 48".into());
         }
@@ -690,7 +705,10 @@ mod tests {
     fn example_uses_default_shortcut_and_panel() {
         let config = Config::parse(include_str!("../config.toml")).unwrap();
         assert!(matches!(config.terminal.side, Side::Right));
-        assert!(matches!(config.terminal.command_target, CommandTarget::Window));
+        assert!(matches!(
+            config.terminal.command_target,
+            CommandTarget::Window
+        ));
         assert!(!config.animations.enabled);
         assert_eq!(config.cursor_trail.target, cursor_trail::Target::None);
         assert!(config.editor.wrap_lines);
@@ -701,14 +719,12 @@ mod tests {
         assert!(!config.interface.syntax_highlighting);
         assert!(!config.interface.show_status_bar);
         let bindings = config.bindings(Path::new("/tmp/config.toml")).unwrap();
-        assert!(bindings.iter().any(|(shortcut, command)|
-            *shortcut == egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Escape)
-                && matches!(command, Command::ToggleEditorTerminal)
-        ));
-        assert!(bindings.iter().any(|(shortcut, command)|
-            *shortcut == egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Escape)
-                && matches!(command, Command::HideTerminal)
-        ));
+        assert!(bindings.iter().any(|(shortcut, command)| *shortcut
+            == egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Escape)
+            && matches!(command, Command::ToggleEditorTerminal)));
+        assert!(bindings.iter().any(|(shortcut, command)| *shortcut
+            == egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Escape)
+            && matches!(command, Command::HideTerminal)));
     }
 
     #[test]
@@ -716,10 +732,10 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let installation = workspace.path().join("synth");
         let path = workspace.path().join("settings/config.toml");
-        assert!(Config::load(&path).unwrap().1.is_empty());
+        assert!(Config::load(&path).is_err());
 
         Config::ensure_file(&path, &installation).unwrap();
-        assert_eq!(Config::load(&path).unwrap().1.len(), 7);
+        assert_eq!(Config::load(&path).unwrap().1.len(), 17);
         fs::write(&path, "[keybindings]").unwrap();
         Config::ensure_file(&path, &installation).unwrap();
         assert!(Config::load(&path).unwrap().1.is_empty());
@@ -728,12 +744,16 @@ mod tests {
     #[test]
     fn search_shortcut_uses_the_configured_table() {
         let path = Path::new("config.toml");
-        let empty = Config::parse("[interface]\nenable_search_and_replace=true\n[keybindings]").unwrap();
+        let empty =
+            Config::parse("[interface]\nenable_search_and_replace=true\n[keybindings]").unwrap();
         assert!(empty.bindings(path).unwrap().is_empty());
         let custom = Config::parse("[interface]\nenable_search_and_replace=true\n[keybindings]\n'Alt+F'='synth search toggle'").unwrap();
         let bindings = custom.bindings(path).unwrap();
         assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].0, egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::F));
+        assert_eq!(
+            bindings[0].0,
+            egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::F)
+        );
         assert!(matches!(bindings[0].1, Command::ToggleSearch));
     }
 
@@ -745,9 +765,26 @@ mod tests {
         ).unwrap();
         let bindings = config.bindings(path).unwrap();
         let commands: Vec<_> = bindings.into_iter().map(|(_, cmd)| cmd).collect();
-        assert!(matches!(&commands[..], [Command::CancelDialog, Command::CloseSearch, Command::ToggleEditorTerminal]));
-        assert!(Config::parse("[keybinds]\n[keybindings]").unwrap().bindings(path).is_err());
-        assert!(Config::parse("[keybinds]\nF7 = []").unwrap().bindings(path).is_err());
+        assert!(matches!(
+            &commands[..],
+            [
+                Command::CancelDialog,
+                Command::CloseSearch,
+                Command::ToggleEditorTerminal
+            ]
+        ));
+        assert!(
+            Config::parse("[keybinds]\n[keybindings]")
+                .unwrap()
+                .bindings(path)
+                .is_err()
+        );
+        assert!(
+            Config::parse("[keybinds]\nF7 = []")
+                .unwrap()
+                .bindings(path)
+                .is_err()
+        );
     }
 
     #[test]
@@ -775,10 +812,9 @@ mod tests {
         assert!(Config::parse("[interface]\ntab_height = 24.0").is_err());
         assert!(Config::parse("[interface]\ntab_max_chars = 0").is_err());
         assert!(Config::parse("[interface]\neditor_padding = 65").is_err());
-        let config = Config::parse(
-            "[interface]\ntab_height = 42.0\ntab_max_chars = 32\neditor_padding = 8",
-        )
-        .unwrap();
+        let config =
+            Config::parse("[interface]\ntab_height = 42.0\ntab_max_chars = 32\neditor_padding = 8")
+                .unwrap();
         assert_eq!(config.interface.tab_height, 42.0);
         assert_eq!(config.interface.tab_max_chars, 32);
         assert_eq!(config.interface.editor_padding, 8);
@@ -805,9 +841,15 @@ mod tests {
         let light = config.colors.palette(Theme::Light);
         assert_eq!(dark.editor_background, Color32::from_rgb(18, 160, 239));
         assert_eq!(dark.tab_text_inactive, Color32::BLACK);
-        assert_eq!(dark.terminal_background, Palette::defaults(Theme::Dark).terminal_background);
+        assert_eq!(
+            dark.terminal_background,
+            Palette::defaults(Theme::Dark).terminal_background
+        );
         assert_eq!(light.editor_background, Color32::from_rgb(68, 85, 102));
-        assert_eq!(light.tab_text_inactive, Palette::defaults(Theme::Light).tab_text_inactive);
+        assert_eq!(
+            light.tab_text_inactive,
+            Palette::defaults(Theme::Light).tab_text_inactive
+        );
     }
 
     #[test]
@@ -835,15 +877,19 @@ mod tests {
             assert_eq!(old.foreground, new.foreground, "{current}");
             assert_eq!(old.selection, new.selection, "{current}");
             assert_eq!(old.muted_surface, new.muted_surface, "{current}");
-            assert_eq!(old.terminal_background, new.terminal_background, "{current}");
+            assert_eq!(
+                old.terminal_background, new.terminal_background,
+                "{current}"
+            );
             assert_eq!(old.tabs_background, new.tabs_background, "{current}");
-            assert_eq!(old.active_tab_background, new.active_tab_background, "{current}");
+            assert_eq!(
+                old.active_tab_background, new.active_tab_background,
+                "{current}"
+            );
             assert_eq!(old.tab_text_active, new.tab_text_active, "{current}");
             assert_eq!(old.tab_text_inactive, new.tab_text_inactive, "{current}");
             assert_eq!(old.status_background, new.status_background, "{current}");
-            let both = format!(
-                "[colors.dark]\n{legacy} = '#123ABC'\n{current} = '#654321'"
-            );
+            let both = format!("[colors.dark]\n{legacy} = '#123ABC'\n{current} = '#654321'");
             assert!(Config::parse(&both).is_err(), "{legacy} and {current}");
         }
     }
@@ -869,6 +915,7 @@ mod tests {
 
     #[test]
     fn invalid_hex_colors_are_rejected() {
+        assert!(Config::parse("[colors.dark]\neditor_bg = '#+abcde'").is_err());
         for color in ["'123456'", "'#12345'", "'#GG0000'", "'#12345678'", "42"] {
             let source = format!("[colors.dark]\neditor_bg = {color}");
             assert!(Config::parse(&source).is_err(), "{color}");
@@ -882,18 +929,36 @@ mod tests {
         let config = Config::parse(include_str!("../config.toml")).unwrap();
         let dark = config.colors.palette(Theme::Dark);
         let light = config.colors.palette(Theme::Light);
-        assert_eq!(dark.editor_background, Palette::defaults(Theme::Dark).editor_background);
-        assert_eq!(dark.terminal_background, Palette::defaults(Theme::Dark).terminal_background);
-        assert_eq!(light.editor_background, Palette::defaults(Theme::Light).editor_background);
-        assert_eq!(light.active_tab_background, Palette::defaults(Theme::Light).active_tab_background);
+        assert_eq!(
+            dark.editor_background,
+            Palette::defaults(Theme::Dark).editor_background
+        );
+        assert_eq!(
+            dark.terminal_background,
+            Palette::defaults(Theme::Dark).terminal_background
+        );
+        assert_eq!(
+            light.editor_background,
+            Palette::defaults(Theme::Light).editor_background
+        );
+        assert_eq!(
+            light.active_tab_background,
+            Palette::defaults(Theme::Light).active_tab_background
+        );
     }
 
     #[test]
     fn legacy_new_tab_button_setting_does_not_change_the_interface() {
         let old_config = Config::parse("[interface]\ntab_new_button = true").unwrap();
         let new_config = Config::parse("[interface]").unwrap();
-        assert_eq!(old_config.interface.tab_height, new_config.interface.tab_height);
-        assert_eq!(old_config.interface.tab_min_width, new_config.interface.tab_min_width);
+        assert_eq!(
+            old_config.interface.tab_height,
+            new_config.interface.tab_height
+        );
+        assert_eq!(
+            old_config.interface.tab_min_width,
+            new_config.interface.tab_min_width
+        );
         assert!(Config::parse("[interface]\ntab_new_button = false").is_ok());
     }
 
@@ -901,13 +966,9 @@ mod tests {
     fn configurable_tab_dimensions_validate() {
         assert!(Config::parse("[interface]\ntab_font_size = 8.0").is_err());
         assert!(Config::parse("[interface]\ntab_min_width = 40.0").is_err());
-        let config = Config::parse(
-            "[interface]\ntab_font_size = 13.0\ntab_min_width = 120.0",
-        )
-        .unwrap();
+        let config =
+            Config::parse("[interface]\ntab_font_size = 13.0\ntab_min_width = 120.0").unwrap();
         assert_eq!(config.interface.tab_font_size, 13.0);
         assert_eq!(config.interface.tab_min_width, 120.0);
     }
-
-
 }

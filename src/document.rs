@@ -28,11 +28,21 @@ pub struct Draft {
 
 impl Draft {
     pub fn label(&self) -> String {
-        self.path.as_ref().map_or_else(|| {
-            let preview: String = self.text.lines().map(str::trim).find(|line| !line.is_empty())
-                .unwrap_or("").chars().take(60).collect();
-            format!("Untitled — {preview}")
-        }, |path| Path::new(path).display().to_string())
+        self.path.as_ref().map_or_else(
+            || {
+                let preview: String = self
+                    .text
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("")
+                    .chars()
+                    .take(60)
+                    .collect();
+                format!("Untitled — {preview}")
+            },
+            |path| Path::new(path).display().to_string(),
+        )
     }
 }
 
@@ -108,17 +118,30 @@ impl Document {
         self.line_starts.clear();
         self.line_starts.push(0);
         self.line_ends.clear();
-        let mut carriage_return = false;
         self.char_count = 0;
-        for character in self.text.chars() {
-            self.char_count += 1;
-            if character == '\n' {
-                self.line_ends.push(self.char_count - 1 - usize::from(carriage_return));
+        for line in self.text.split_inclusive('\n') {
+            self.char_count += line.chars().count();
+            if line.ends_with('\n') {
+                self.line_ends
+                    .push(self.char_count - 1 - usize::from(line.ends_with("\r\n")));
                 self.line_starts.push(self.char_count);
             }
-            carriage_return = character == '\r';
         }
         self.line_ends.push(self.char_count);
+    }
+
+    pub fn byte_at_char(&self, index: usize) -> usize {
+        if index >= self.char_count {
+            return self.text.len();
+        }
+        let from_end = self.char_count - 1 - index;
+        let mut chars = self.text.char_indices();
+        let position = if index <= from_end {
+            chars.nth(index)
+        } else {
+            chars.nth_back(from_end)
+        };
+        position.map_or(self.text.len(), |(byte, _)| byte)
     }
 
     pub fn line_count(&self) -> usize {
@@ -220,6 +243,12 @@ impl Document {
             let permissions = fs::metadata(&target)
                 .map_err(|error| file_error(&target, error))?
                 .permissions();
+            if permissions.readonly() {
+                return Err(format!(
+                    "{} is read-only. Use synth saveas PATH to save a copy.",
+                    target.display()
+                ));
+            }
             output
                 .as_file()
                 .set_permissions(permissions)
@@ -246,11 +275,7 @@ impl Document {
         if query.is_empty() {
             return Err("Search text is empty".into());
         }
-        let start_byte = self
-            .text
-            .char_indices()
-            .nth(start)
-            .map_or(self.text.len(), |(byte, _)| byte);
+        let start_byte = self.byte_at_char(start);
         let found = self.text[start_byte..]
             .find(&query)
             .map(|offset| start_byte + offset)
@@ -355,9 +380,13 @@ impl Documents {
         document.bom = draft.bom;
         document.text_changed();
         document.move_cursor(draft.cursor.min(document.char_count));
-        if let Some(index) = self.items.iter().position(|open| {
-            !open.dirty()
-                && (open.id == 0 || (document.path.is_some() && open.path == document.path))
+        let existing = self.items.iter().position(|open| {
+            !open.dirty() && document.path.is_some() && open.path == document.path
+        });
+        if let Some(index) = existing.or_else(|| {
+            self.items
+                .iter()
+                .position(|open| open.id == 0 && !open.dirty())
         }) {
             self.items[index] = document;
             self.active = index;
@@ -448,6 +477,62 @@ impl Documents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn char_offsets_match_utf8_boundaries_after_edits() {
+        let mut doc = Document::empty(0);
+        for text in ["", "aé猫🦀\r\nb", "猫\n", "x\r", "\n\n"] {
+            doc.text = text.to_owned();
+            doc.text_changed();
+            for (index, (byte, _)) in text.char_indices().enumerate() {
+                assert_eq!(doc.byte_at_char(index), byte);
+            }
+            assert_eq!(doc.byte_at_char(text.chars().count()), text.len());
+            assert_eq!(doc.byte_at_char(usize::MAX), text.len());
+        }
+    }
+
+    #[test]
+    fn restore_prefers_matching_file_to_unused_initial_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes");
+        fs::write(&path, "old").unwrap();
+        let mut docs = Documents::default();
+        docs.create();
+        docs.open(&path).unwrap();
+        docs.current_mut().text.push_str(" edit");
+        docs.current_mut().text_changed();
+        let draft = docs.current().draft();
+        docs.reload(docs.current().id).unwrap();
+        docs.restore_draft(draft);
+        assert_eq!(docs.current().text, "old edit");
+        assert_eq!(
+            docs.items.iter().filter(|doc| doc.path.is_some()).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn read_only_document_can_only_be_saved_to_a_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("original");
+        fs::write(&path, "original").unwrap();
+        let original = fs::metadata(&path).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&path, readonly).unwrap();
+        let mut docs = Documents::default();
+        docs.open(&path).unwrap();
+        docs.current_mut().text.push('!');
+        docs.current_mut().text_changed();
+        assert!(docs.save(None).is_err());
+        assert!(docs.current().dirty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        let copy = dir.path().join("copy");
+        docs.save(Some(&copy)).unwrap();
+        assert_eq!(fs::read_to_string(copy).unwrap(), "original!");
+        fs::set_permissions(path, original).unwrap();
+    }
 
     #[test]
     fn goto_clamps_before_crlf_when_inserting_and_saving() {
@@ -587,5 +672,4 @@ mod tests {
         assert!(documents.items[1].path.is_none());
         assert_eq!(documents.current().text, "Hello");
     }
-
 }

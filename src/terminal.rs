@@ -128,7 +128,9 @@ impl Terminal {
             crate::config::CommandTarget::Window => std::process::id().to_string(),
             crate::config::CommandTarget::Shared => String::new(),
         };
-        options.env.insert(crate::command::WINDOW_ENV.into(), target);
+        options
+            .env
+            .insert(crate::command::WINDOW_ENV.into(), target);
         for name in [
             "WT_SESSION",
             "KITTY_WINDOW_ID",
@@ -260,7 +262,12 @@ impl Terminal {
         egui::Id::new("terminal input")
     }
 
-    pub fn process_events(&mut self, ctx: &egui::Context, foreground: Color32, background: Color32) -> bool {
+    pub fn process_events(
+        &mut self,
+        ctx: &egui::Context,
+        foreground: Color32,
+        background: Color32,
+    ) -> bool {
         for event in self.events.try_iter() {
             let event = match event {
                 TerminalEvent::Terminal(event) => event,
@@ -327,7 +334,9 @@ impl Terminal {
             let _ = self.sender.send(Msg::Resize(size));
             self.size = size;
         }
-        if self.process_events(ui.ctx(), foreground, background) { return true; }
+        if self.process_events(ui.ctx(), foreground, background) {
+            return true;
+        }
         let response = ui.interact(
             rect.intersect(ui.clip_rect()),
             Self::focus_id(),
@@ -718,12 +727,19 @@ pub fn restore_modified_copy_key(input: &mut egui::RawInput) {
         if !matches!(input.events[index], egui::Event::Copy) {
             continue;
         }
-        let modifiers = input.events[index + 1..].iter()
+        let modifiers = input.events[index + 1..]
+            .iter()
             .take_while(|event| !matches!(event, egui::Event::Copy))
             .find_map(|event| match event {
-                egui::Event::Key { key: Key::C, pressed: false, modifiers, .. } => Some(*modifiers),
+                egui::Event::Key {
+                    key: Key::C,
+                    pressed: false,
+                    modifiers,
+                    ..
+                } => Some(*modifiers),
                 _ => None,
-            }).unwrap_or(input.modifiers);
+            })
+            .unwrap_or(input.modifiers);
         if modifiers.ctrl && modifiers.shift {
             input.events[index] = egui::Event::Key {
                 key: Key::C,
@@ -736,16 +752,16 @@ pub fn restore_modified_copy_key(input: &mut egui::RawInput) {
     }
 }
 
-fn printable_key(key: Key) -> Option<char> {
-    if key == Key::Space {
-        return Some(' ');
+pub(crate) fn printable_key(key: Key) -> Option<char> {
+    match key {
+        Key::Space => return Some(' '),
+        Key::Minus => return Some('-'),
+        Key::Quote => return Some('\''),
+        _ => {}
     }
     let mut chars = key.symbol_or_name().chars();
     let character = chars.next()?;
-    chars
-        .next()
-        .is_none()
-        .then_some(character.to_ascii_lowercase())
+    (character.is_ascii() && chars.next().is_none()).then_some(character.to_ascii_lowercase())
 }
 
 fn kitty_key(stroke: KeyStroke<'_>, mode: TermMode) -> Option<String> {
@@ -900,6 +916,22 @@ fn key_bytes(key: Key, modifiers: Modifiers, mode: TermMode) -> Option<Vec<u8>> 
         return Some(sequence.into_bytes());
     }
 
+    let function_key = match key {
+        Key::F1 => Some('P'),
+        Key::F2 => Some('Q'),
+        Key::F3 => Some('R'),
+        Key::F4 => Some('S'),
+        _ => None,
+    };
+    if let Some(code) = function_key {
+        let sequence = if modifiers_code == 1 {
+            format!("\x1bO{code}")
+        } else {
+            format!("\x1b[1;{modifiers_code}{code}")
+        };
+        return Some(sequence.into_bytes());
+    }
+
     let tilde = match key {
         Key::Insert => Some(2),
         Key::Delete => Some(3),
@@ -931,10 +963,6 @@ fn key_bytes(key: Key, modifiers: Modifiers, mode: TermMode) -> Option<Vec<u8>> 
         Key::Backspace if modifiers.ctrl => b"\x08",
         Key::Backspace => b"\x7f",
         Key::Escape => b"\x1b",
-        Key::F1 => b"\x1bOP",
-        Key::F2 => b"\x1bOQ",
-        Key::F3 => b"\x1bOR",
-        Key::F4 => b"\x1bOS",
         _ => return None,
     };
     Some(bytes.to_vec())
@@ -943,6 +971,31 @@ fn key_bytes(key: Key, modifiers: Modifiers, mode: TermMode) -> Option<Vec<u8>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn printable_keys_use_input_characters() {
+        assert_eq!(printable_key(Key::Minus), Some('-'));
+        assert_eq!(printable_key(Key::Quote), Some('\''));
+        assert_eq!(printable_key(Key::Space), Some(' '));
+        assert_eq!(printable_key(Key::ArrowDown), None);
+    }
+
+    #[test]
+    fn function_keys_preserve_modifiers() {
+        let mode = TermMode::empty();
+        assert_eq!(
+            key_bytes(Key::F1, Modifiers::SHIFT, mode).unwrap(),
+            b"\x1b[1;2P"
+        );
+        assert_eq!(
+            key_bytes(Key::F4, Modifiers::CTRL, mode).unwrap(),
+            b"\x1b[1;5S"
+        );
+        assert_eq!(
+            key_bytes(Key::F2, Modifiers::NONE, mode).unwrap(),
+            b"\x1bOQ"
+        );
+    }
 
     #[test]
     fn control_keys_reach_the_terminal_as_bytes() {

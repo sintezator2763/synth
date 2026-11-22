@@ -38,6 +38,24 @@ fn socket_name(installation: &Path, window: Option<NonZeroU32>) -> io::Result<Na
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum Zoom {
+    In,
+    Out,
+    Reset,
+}
+
+impl Zoom {
+    fn parse(action: &str) -> Result<Self, String> {
+        match action {
+            "in" => Ok(Self::In),
+            "out" => Ok(Self::Out),
+            "reset" => Ok(Self::Reset),
+            _ => Err("Expected zoom in, out, or reset".into()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Command {
     Open(OsString),
@@ -61,6 +79,8 @@ pub enum Command {
     ToggleTerminal,
     ToggleEditorTerminal,
     CopyTerminalSelection,
+    TerminalZoom(Zoom),
+    InterfaceZoom(Zoom),
     HideTerminal,
     TerminalImage(OsString),
     ToggleFocus,
@@ -75,51 +95,81 @@ pub fn help() -> String {
     use std::fmt::Write as _;
 
     const SECTIONS: &[(&str, &[(&str, &str)])] = &[
-        ("DOCUMENTS", &[
-            ("new", "Create an untitled document"),
-            ("open PATH", "Open a file or switch to it"),
-            ("save", "Save the active document"),
-            ("saveas PATH", "Save the active document to PATH"),
-            ("reload", "Reload the active document from disk"),
-            ("goto LINE[:COLUMN]", "Move the cursor to a line and column"),
-            ("wrap toggle", "Toggle line wrapping in the active document"),
-            ("close", "Close an unchanged document"),
-            ("close --discard", "Close without saving changes"),
-            ("properties", "Show file information"),
-        ]),
-        ("TABS", &[
-            ("tab list", "List all open documents"),
-            ("tab next", "Switch to the next tab"),
-            ("tab prev", "Switch to the previous tab"),
-        ]),
-        ("SEARCH", &[
-            ("find TEXT", "Find the first occurrence"),
-            ("find next", "Find the next occurrence"),
-            ("find -- next", "Find the literal word \"next\""),
-            ("search toggle", "Show or hide the search and replace bar"),
-            ("search close", "Close the search and replace bar"),
-            ("search next", "Go to the next match in the search bar"),
-        ]),
-        ("TERMINAL", &[
-            ("terminal toggle", "Show or hide the terminal"),
-            ("terminal toggle-edit", "Toggle the terminal from the editor"),
-            ("terminal copy", "Copy the terminal selection"),
-            ("terminal hide", "Hide the terminal panel"),
-            ("terminal image PATH", "Display a PNG or JPEG in the terminal"),
-            ("focus toggle", "Switch focus between editor and terminal"),
-        ]),
-        ("CONFIGURATION", &[
-            ("config path", "Print the configuration path"),
-            ("config check", "Validate the configuration"),
-            ("config reload", "Reload configuration from disk"),
-        ]),
-        ("GENERAL", &[
-            ("dialog cancel", "Dismiss the current confirmation dialog"),
-            ("help", "Display this help"),
-            ("-h, --help", "Display this help"),
-        ]),
+        (
+            "DOCUMENTS",
+            &[
+                ("new", "Create an untitled document"),
+                ("open PATH", "Open a file or switch to it"),
+                ("save", "Save the active document"),
+                ("saveas PATH", "Save the active document to PATH"),
+                ("reload", "Reload the active document from disk"),
+                ("goto LINE[:COLUMN]", "Move the cursor to a line and column"),
+                ("wrap toggle", "Toggle line wrapping in the active document"),
+                ("close", "Close an unchanged document"),
+                ("close --discard", "Close without saving changes"),
+                ("properties", "Show file information"),
+            ],
+        ),
+        (
+            "TABS",
+            &[
+                ("tab list", "List all open documents"),
+                ("tab next", "Switch to the next tab"),
+                ("tab prev", "Switch to the previous tab"),
+            ],
+        ),
+        (
+            "SEARCH",
+            &[
+                ("find TEXT", "Find the first occurrence"),
+                ("find next", "Find the next occurrence"),
+                ("find -- next", "Find the literal word \"next\""),
+                ("search toggle", "Show or hide the search and replace bar"),
+                ("search close", "Close the search and replace bar"),
+                ("search next", "Go to the next match in the search bar"),
+            ],
+        ),
+        (
+            "TERMINAL",
+            &[
+                ("terminal toggle", "Show or hide the terminal"),
+                (
+                    "terminal toggle-edit",
+                    "Toggle the terminal from the editor",
+                ),
+                ("terminal copy", "Copy the terminal selection"),
+                (
+                    "terminal zoom ACTION",
+                    "Change terminal font size (in, out, reset)",
+                ),
+                ("terminal hide", "Hide the terminal panel"),
+                (
+                    "terminal image PATH",
+                    "Display a PNG or JPEG in the terminal",
+                ),
+                ("focus toggle", "Switch focus between editor and terminal"),
+            ],
+        ),
+        (
+            "CONFIGURATION",
+            &[
+                ("config path", "Print the configuration path"),
+                ("config check", "Validate the configuration"),
+                ("config reload", "Reload configuration from disk"),
+            ],
+        ),
+        (
+            "GENERAL",
+            &[
+                ("dialog cancel", "Dismiss the current confirmation dialog"),
+                ("zoom ACTION", "Scale the whole interface (in, out, reset)"),
+                ("help", "Display this help"),
+                ("-h, --help", "Display this help"),
+            ],
+        ),
     ];
-    let mut output = String::from("Synth - terminal-driven text editor\n\nUsage: synth COMMAND [ARGS]\n\n");
+    let mut output =
+        String::from("Synth - terminal-driven text editor\n\nUsage: synth COMMAND [ARGS]\n\n");
     for &(title, commands) in SECTIONS {
         output.push_str(title);
         output.push('\n');
@@ -169,6 +219,8 @@ impl Command {
             (2, "terminal", "toggle") => Ok(Self::ToggleTerminal),
             (2, "terminal", "toggle-edit") => Ok(Self::ToggleEditorTerminal),
             (2, "terminal", "copy") => Ok(Self::CopyTerminalSelection),
+            (3, "terminal", "zoom") => Zoom::parse(word(2)).map(Self::TerminalZoom),
+            (2, "zoom", action) => Zoom::parse(action).map(Self::InterfaceZoom),
             (2, "terminal", "hide") => Ok(Self::HideTerminal),
             (3.., "terminal", "image") => {
                 path_argument(directory, &args[2..]).map(Self::TerminalImage)
@@ -278,7 +330,9 @@ pub fn dispatch_if_running(
     let window = match std::env::var(WINDOW_ENV) {
         Ok(value) if value.is_empty() => None,
         Ok(value) => Some(
-            value.parse::<NonZeroU32>().map_err(|_| "Invalid SYNTH_WINDOW_PID")?,
+            value
+                .parse::<NonZeroU32>()
+                .map_err(|_| "Invalid SYNTH_WINDOW_PID")?,
         ),
         Err(std::env::VarError::NotPresent) => None,
         Err(_) => return Err("Invalid SYNTH_WINDOW_PID".into()),
@@ -288,7 +342,12 @@ pub fn dispatch_if_running(
     let mut stream = loop {
         match Stream::connect(name.clone()) {
             Ok(stream) => break stream,
-            Err(error) if matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
+            {
                 if retry {
                     retry = false;
                     std::thread::sleep(SHARED_RETRY * 2);
@@ -299,7 +358,12 @@ pub fn dispatch_if_running(
                     None => Ok(None),
                 };
             }
-            Err(error) => return Err(format!("Could not connect to the running Synth: {}", crate::io_message(&error))),
+            Err(error) => {
+                return Err(format!(
+                    "Could not connect to the running Synth: {}",
+                    crate::io_message(&error)
+                ));
+            }
         }
     };
     exchange(&mut stream, command)
@@ -325,14 +389,18 @@ pub fn listen(installation: &Path, ctx: &egui::Context) -> mpsc::Receiver<Reques
                 let installation = installation.to_owned();
                 let ctx = ctx.clone();
                 let sender = sender.clone();
-                std::thread::spawn(move || loop {
-                    std::thread::sleep(SHARED_RETRY);
-                    match listen_at(&installation, None, ctx.clone(), sender.clone()) {
-                        Err(error) if address_taken(&error) => continue,
-                        Err(error) => eprintln!("Synth command listener: {}", crate::io_message(&error)),
-                        Ok(()) => {}
+                std::thread::spawn(move || {
+                    loop {
+                        std::thread::sleep(SHARED_RETRY);
+                        match listen_at(&installation, None, ctx.clone(), sender.clone()) {
+                            Err(error) if address_taken(&error) => continue,
+                            Err(error) => {
+                                eprintln!("Synth command listener: {}", crate::io_message(&error))
+                            }
+                            Ok(()) => {}
+                        }
+                        break;
                     }
-                    break;
                 });
             }
             Err(error) => eprintln!("Synth command listener: {}", crate::io_message(&error)),
@@ -529,13 +597,17 @@ mod tests {
             "config check",
             "-h, --help",
         ] {
-            assert!(printed.lines().any(|line| line.starts_with(&format!("  {command}"))));
+            assert!(
+                printed
+                    .lines()
+                    .any(|line| line.starts_with(&format!("  {command}")))
+            );
         }
         let rows = printed
             .lines()
             .filter(|line| line.starts_with("  "))
             .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 31);
+        assert_eq!(rows.len(), 33);
         for row in rows {
             assert_eq!(&row[24..26], "  ");
         }
@@ -601,13 +673,15 @@ mod tests {
                 .send(Err("Expected error reply".into()))
                 .unwrap();
         });
-        let connect = |window| Stream::connect(socket_name(&installation, window).unwrap()).unwrap();
+        let connect =
+            |window| Stream::connect(socket_name(&installation, window).unwrap()).unwrap();
         let mut window = connect(NonZeroU32::new(std::process::id()));
         assert_eq!(
             exchange(
                 &mut window,
                 &Command::Open(directory.path().join("caf\u{e9} file.txt").into_os_string())
-            ).unwrap(),
+            )
+            .unwrap(),
             Ok("Opened".into())
         );
         let mut shared = connect(None);
