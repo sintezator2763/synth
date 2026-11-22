@@ -876,7 +876,7 @@ fn run_shortcut_shell(script: &str, directory: Option<&Path>) -> Result<(), Stri
         use std::os::windows::process::CommandExt;
 
         let executable = env::var_os("SystemRoot")
-            .map(|root| PathBuf::from(root).join("System32/cmd.exe"))
+            .map(|root| PathBuf::from(root).join("System32").join("cmd.exe"))
             .unwrap_or_else(|| PathBuf::from("cmd.exe"));
         let mut shell = std::process::Command::new(executable);
         shell
