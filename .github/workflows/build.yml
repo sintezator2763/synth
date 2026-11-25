@@ -184,7 +184,7 @@ jobs:
           name: Synth-${{ matrix.platform }}
           path: dist/*
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 1
 
   release:
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
