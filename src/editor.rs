@@ -350,7 +350,11 @@ impl Editor {
                         if line.is_positive() {
                             ui.painter().set(
                                 line_shape,
-                                egui::Shape::rect_filled(line, 0.0, config.palette().current_line),
+                                egui::Shape::rect_filled(
+                                    line,
+                                    0.0,
+                                    config.palette().surface_container_low,
+                                ),
                             );
                         }
                     }
@@ -490,7 +494,7 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
     egui::TopBottomPanel::top("tabs")
         .resizable(false)
         .show_separator_line(false)
-        .frame(egui::Frame::NONE.fill(palette.tabs_background))
+        .frame(egui::Frame::NONE.fill(palette.surface_container))
         .exact_height(height)
         .show(ctx, |ui| {
             let mut area = ui.max_rect().shrink2(egui::vec2(10.0, 0.0));
@@ -511,7 +515,7 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                         let active = index == documents.active;
                         let foreground = palette.tab_text(active);
                         let fill = if active {
-                            palette.active_tab_background
+                            palette.secondary_container
                         } else {
                             Color32::TRANSPARENT
                         };
@@ -530,7 +534,7 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                                         ui.painter().circle_filled(
                                             dot.center(),
                                             2.5,
-                                            palette.accent,
+                                            palette.primary,
                                         );
                                     }
                                     if config.interface.show_file_icons {
@@ -545,7 +549,7 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                                             _ => "≡",
                                         };
                                         ui.label(
-                                            RichText::new(icon).color(palette.tab_text_inactive),
+                                            RichText::new(icon).color(palette.on_surface_variant),
                                         );
                                     }
                                     ui.label(
@@ -562,7 +566,7 @@ pub fn tabs(ctx: &egui::Context, documents: &Documents, config: &Config) -> Opti
                             ui.painter().hline(
                                 tab.response.rect.x_range(),
                                 tab.response.rect.bottom(),
-                                egui::Stroke::new(2.0_f32, palette.accent),
+                                egui::Stroke::new(2.0_f32, palette.primary),
                             );
                             let key = ui.id().with("visible active tab");
                             let previous = ui.data_mut(|data| data.get_temp::<u64>(key));
@@ -612,7 +616,7 @@ pub fn status(ctx: &egui::Context, document: &Document, config: &Config) {
         return;
     }
     egui::TopBottomPanel::bottom("status")
-        .frame(egui::Frame::NONE.fill(config.palette().status_background))
+        .frame(egui::Frame::NONE.fill(config.palette().surface_container_high))
         .exact_height(height)
         .show(ctx, |ui| {
             let mut area = ui.max_rect().shrink2(egui::vec2(12.0, 0.0));
@@ -689,12 +693,12 @@ impl SyntaxLayouts {
             a: 255,
         };
         let mut theme = SyntaxTheme::default();
-        theme.settings.foreground = Some(color(palette.foreground));
+        theme.settings.foreground = Some(color(palette.on_surface));
         for (scope, ink) in [
-            ("keyword, storage, entity.name.tag", palette.accent),
-            ("string", palette.syntax_string),
-            ("constant, support.type", palette.syntax_literal),
-            ("comment", palette.syntax_comment),
+            ("keyword, storage, entity.name.tag", palette.primary),
+            ("string", palette.secondary),
+            ("constant, support.type", palette.tertiary),
+            ("comment", palette.outline),
         ] {
             theme.scopes.push(ThemeItem {
                 scope: scope.parse().expect("built-in syntax scope"),
