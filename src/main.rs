@@ -373,7 +373,7 @@ impl Synth {
                     egui::Stroke::new(
                         1.0_f32,
                         if id == active {
-                            self.config.palette().accent
+                            self.config.palette().primary
                         } else {
                             ui.visuals().widgets.noninteractive.bg_stroke.color
                         },
@@ -955,7 +955,11 @@ impl Synth {
             if let Some(terminal) = &mut self.terminal {
                 terminal.clear_cursor_trail();
                 let palette = self.config.palette();
-                if terminal.process_events(ctx, palette.foreground, palette.terminal_background) {
+                if terminal.process_events(
+                    ctx,
+                    palette.on_surface,
+                    palette.surface_container_lowest,
+                ) {
                     self.terminal = None;
                     if self.terminal_open {
                         self.toggle_terminal();
@@ -972,7 +976,7 @@ impl Synth {
             Side::Right => egui::SidePanel::right("terminal"),
         };
         let font_size = self.terminal_font_size();
-        let background = self.config.palette().terminal_background;
+        let background = self.config.palette().surface_container_lowest;
         panel
             .resizable(false)
             .show_separator_line(true)

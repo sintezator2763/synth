@@ -131,31 +131,37 @@ struct ThemeFile {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ColorOverrides {
-    syntax_literal: Option<HexColor>,
-    syntax_comment: Option<HexColor>,
-    syntax_string: Option<HexColor>,
-    current_line: Option<HexColor>,
-    accent: Option<HexColor>,
-    #[serde(rename = "editor_bg", alias = "editor_background")]
-    editor_background: Option<HexColor>,
-    #[serde(rename = "text_fg", alias = "foreground")]
-    foreground: Option<HexColor>,
-    #[serde(rename = "selection_bg", alias = "selection")]
-    selection: Option<HexColor>,
-    #[serde(rename = "surface_bg", alias = "muted_surface")]
-    muted_surface: Option<HexColor>,
-    #[serde(rename = "terminal_bg", alias = "terminal_background")]
-    terminal_background: Option<HexColor>,
-    #[serde(rename = "tab_bar_bg", alias = "tabs_background")]
-    tabs_background: Option<HexColor>,
-    #[serde(rename = "tab_active_bg", alias = "active_tab_background")]
-    active_tab_background: Option<HexColor>,
-    #[serde(rename = "tab_active_fg", alias = "tab_text_active")]
-    tab_text_active: Option<HexColor>,
-    #[serde(rename = "tab_inactive_fg", alias = "tab_text_inactive")]
-    tab_text_inactive: Option<HexColor>,
-    #[serde(rename = "status_bar_bg", alias = "status_background")]
-    status_background: Option<HexColor>,
+    #[serde(alias = "accent")]
+    primary: Option<HexColor>,
+    #[serde(alias = "syntax_string")]
+    secondary: Option<HexColor>,
+    #[serde(alias = "syntax_literal")]
+    tertiary: Option<HexColor>,
+    #[serde(alias = "syntax_comment")]
+    outline: Option<HexColor>,
+    #[serde(alias = "selection_bg", alias = "selection")]
+    primary_container: Option<HexColor>,
+    #[serde(alias = "tab_active_bg", alias = "active_tab_background")]
+    secondary_container: Option<HexColor>,
+    #[serde(alias = "tab_active_fg", alias = "tab_text_active")]
+    on_secondary_container: Option<HexColor>,
+    #[serde(alias = "editor_bg", alias = "editor_background")]
+    surface: Option<HexColor>,
+    #[serde(alias = "text_fg", alias = "foreground")]
+    on_surface: Option<HexColor>,
+    #[serde(alias = "tab_inactive_fg", alias = "tab_text_inactive")]
+    on_surface_variant: Option<HexColor>,
+    #[serde(alias = "terminal_bg", alias = "terminal_background")]
+    surface_container_lowest: Option<HexColor>,
+    #[serde(alias = "current_line")]
+    surface_container_low: Option<HexColor>,
+    #[serde(alias = "tab_bar_bg", alias = "tabs_background")]
+    surface_container: Option<HexColor>,
+    #[serde(alias = "status_bar_bg", alias = "status_background")]
+    surface_container_high: Option<HexColor>,
+    #[serde(alias = "surface_bg", alias = "muted_surface")]
+    surface_container_highest: Option<HexColor>,
+    error: Option<HexColor>,
     #[serde(rename = "decoration_accent_1", alias = "window_dot_red")]
     _legacy_decoration_accent_1: Option<HexColor>,
     #[serde(rename = "decoration_accent_2", alias = "window_dot_yellow")]
@@ -164,61 +170,64 @@ struct ColorOverrides {
     _legacy_decoration_accent_3: Option<HexColor>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
-    pub syntax_literal: Color32,
-    pub syntax_comment: Color32,
-    pub syntax_string: Color32,
-    pub current_line: Color32,
-    pub accent: Color32,
-    pub editor_background: Color32,
-    pub foreground: Color32,
-    pub selection: Color32,
-    pub muted_surface: Color32,
-    pub terminal_background: Color32,
-    pub tabs_background: Color32,
-    pub active_tab_background: Color32,
-    pub tab_text_active: Color32,
-    pub tab_text_inactive: Color32,
-    pub status_background: Color32,
+    pub primary: Color32,
+    pub secondary: Color32,
+    pub tertiary: Color32,
+    pub outline: Color32,
+    pub primary_container: Color32,
+    pub secondary_container: Color32,
+    pub on_secondary_container: Color32,
+    pub surface: Color32,
+    pub on_surface: Color32,
+    pub on_surface_variant: Color32,
+    pub surface_container_lowest: Color32,
+    pub surface_container_low: Color32,
+    pub surface_container: Color32,
+    pub surface_container_high: Color32,
+    pub surface_container_highest: Color32,
+    error: Option<Color32>,
 }
 
 impl Palette {
     fn defaults(theme: Theme) -> Self {
         match theme {
             Theme::Dark => Self {
-                syntax_literal: Color32::from_rgb(222, 184, 131),
-                syntax_comment: Color32::from_rgb(156, 151, 140),
-                syntax_string: Color32::from_rgb(173, 190, 145),
-                current_line: Color32::from_rgb(42, 43, 41),
-                accent: Color32::from_rgb(222, 145, 109),
-                editor_background: Color32::from_rgb(34, 35, 34),
-                foreground: Color32::from_rgb(232, 223, 206),
-                selection: Color32::from_rgb(85, 69, 59),
-                muted_surface: Color32::from_rgb(46, 45, 43),
-                terminal_background: Color32::from_rgb(28, 29, 28),
-                tabs_background: Color32::from_rgb(41, 41, 39),
-                active_tab_background: Color32::from_rgb(52, 51, 47),
-                tab_text_active: Color32::from_rgb(243, 233, 215),
-                tab_text_inactive: Color32::from_rgb(183, 174, 161),
-                status_background: Color32::from_rgb(41, 41, 39),
+                primary: Color32::from_rgb(222, 145, 109),
+                secondary: Color32::from_rgb(173, 190, 145),
+                tertiary: Color32::from_rgb(222, 184, 131),
+                outline: Color32::from_rgb(156, 151, 140),
+                primary_container: Color32::from_rgb(85, 69, 59),
+                secondary_container: Color32::from_rgb(52, 51, 47),
+                on_secondary_container: Color32::from_rgb(243, 233, 215),
+                surface: Color32::from_rgb(34, 35, 34),
+                on_surface: Color32::from_rgb(232, 223, 206),
+                on_surface_variant: Color32::from_rgb(183, 174, 161),
+                surface_container_lowest: Color32::from_rgb(28, 29, 28),
+                surface_container_low: Color32::from_rgb(42, 43, 41),
+                surface_container: Color32::from_rgb(41, 41, 39),
+                surface_container_high: Color32::from_rgb(41, 41, 39),
+                surface_container_highest: Color32::from_rgb(46, 45, 43),
+                error: None,
             },
             Theme::Light => Self {
-                syntax_literal: Color32::from_rgb(133, 90, 40),
-                syntax_comment: Color32::from_rgb(89, 102, 116),
-                syntax_string: Color32::from_rgb(75, 112, 46),
-                current_line: Color32::from_rgb(232, 237, 243),
-                accent: Color32::from_rgb(155, 77, 40),
-                editor_background: Color32::from_rgb(246, 249, 253),
-                foreground: Color32::from_rgb(28, 43, 61),
-                selection: Color32::from_rgb(179, 214, 247),
-                muted_surface: Color32::from_rgb(234, 239, 246),
-                terminal_background: Color32::from_rgb(234, 241, 249),
-                tabs_background: Color32::from_rgb(230, 235, 243),
-                active_tab_background: Color32::from_rgb(255, 255, 255),
-                tab_text_active: Color32::from_rgb(28, 43, 61),
-                tab_text_inactive: Color32::from_rgb(92, 103, 118),
-                status_background: Color32::from_rgb(234, 239, 246),
+                primary: Color32::from_rgb(155, 77, 40),
+                secondary: Color32::from_rgb(75, 112, 46),
+                tertiary: Color32::from_rgb(133, 90, 40),
+                outline: Color32::from_rgb(89, 102, 116),
+                primary_container: Color32::from_rgb(179, 214, 247),
+                secondary_container: Color32::from_rgb(255, 255, 255),
+                on_secondary_container: Color32::from_rgb(28, 43, 61),
+                surface: Color32::from_rgb(246, 249, 253),
+                on_surface: Color32::from_rgb(28, 43, 61),
+                on_surface_variant: Color32::from_rgb(92, 103, 118),
+                surface_container_lowest: Color32::from_rgb(234, 241, 249),
+                surface_container_low: Color32::from_rgb(232, 237, 243),
+                surface_container: Color32::from_rgb(230, 235, 243),
+                surface_container_high: Color32::from_rgb(234, 239, 246),
+                surface_container_highest: Color32::from_rgb(234, 239, 246),
+                error: None,
             },
         }
     }
@@ -228,22 +237,25 @@ impl Palette {
             Theme::Dark => egui::Visuals::dark(),
             Theme::Light => egui::Visuals::light(),
         };
-        visuals.text_cursor.stroke.color = self.accent;
-        visuals.selection.stroke.color = self.accent;
-        visuals.window_fill = self.muted_surface;
-        visuals.panel_fill = self.editor_background;
-        visuals.override_text_color = Some(self.foreground);
-        visuals.selection.bg_fill = self.selection;
-        visuals.extreme_bg_color = self.editor_background;
-        visuals.faint_bg_color = self.muted_surface;
+        visuals.text_cursor.stroke.color = self.primary;
+        visuals.selection.stroke.color = self.primary;
+        visuals.window_fill = self.surface_container_highest;
+        visuals.panel_fill = self.surface;
+        visuals.override_text_color = Some(self.on_surface);
+        visuals.selection.bg_fill = self.primary_container;
+        visuals.extreme_bg_color = self.surface;
+        visuals.faint_bg_color = self.surface_container_highest;
+        if let Some(error) = self.error {
+            visuals.error_fg_color = error;
+        }
         visuals
     }
 
     pub fn tab_text(self, active: bool) -> Color32 {
         if active {
-            self.tab_text_active
+            self.on_secondary_container
         } else {
-            self.tab_text_inactive
+            self.on_surface_variant
         }
     }
 }
@@ -254,53 +266,41 @@ impl Colors {
             Theme::Dark => &self.dark,
             Theme::Light => &self.light,
         };
-        let mut palette = Palette::defaults(theme);
-        if let Some(value) = overrides.editor_background {
-            palette.editor_background = value.0;
+        let defaults = Palette::defaults(theme);
+        let color = |value: Option<HexColor>, base| value.map_or(base, |value| value.0);
+        Palette {
+            primary: color(overrides.primary, defaults.primary),
+            secondary: color(overrides.secondary, defaults.secondary),
+            tertiary: color(overrides.tertiary, defaults.tertiary),
+            outline: color(overrides.outline, defaults.outline),
+            primary_container: color(overrides.primary_container, defaults.primary_container),
+            secondary_container: color(overrides.secondary_container, defaults.secondary_container),
+            on_secondary_container: color(
+                overrides.on_secondary_container,
+                defaults.on_secondary_container,
+            ),
+            surface: color(overrides.surface, defaults.surface),
+            on_surface: color(overrides.on_surface, defaults.on_surface),
+            on_surface_variant: color(overrides.on_surface_variant, defaults.on_surface_variant),
+            surface_container_lowest: color(
+                overrides.surface_container_lowest,
+                defaults.surface_container_lowest,
+            ),
+            surface_container_low: color(
+                overrides.surface_container_low,
+                defaults.surface_container_low,
+            ),
+            surface_container: color(overrides.surface_container, defaults.surface_container),
+            surface_container_high: color(
+                overrides.surface_container_high,
+                defaults.surface_container_high,
+            ),
+            surface_container_highest: color(
+                overrides.surface_container_highest,
+                defaults.surface_container_highest,
+            ),
+            error: overrides.error.map(|value| value.0),
         }
-        if let Some(value) = overrides.accent {
-            palette.accent = value.0;
-        }
-        if let Some(value) = overrides.current_line {
-            palette.current_line = value.0;
-        }
-        if let Some(value) = overrides.syntax_string {
-            palette.syntax_string = value.0;
-        }
-        if let Some(value) = overrides.syntax_comment {
-            palette.syntax_comment = value.0;
-        }
-        if let Some(value) = overrides.syntax_literal {
-            palette.syntax_literal = value.0;
-        }
-        if let Some(value) = overrides.foreground {
-            palette.foreground = value.0;
-        }
-        if let Some(value) = overrides.selection {
-            palette.selection = value.0;
-        }
-        if let Some(value) = overrides.muted_surface {
-            palette.muted_surface = value.0;
-        }
-        if let Some(value) = overrides.terminal_background {
-            palette.terminal_background = value.0;
-        }
-        if let Some(value) = overrides.tabs_background {
-            palette.tabs_background = value.0;
-        }
-        if let Some(value) = overrides.active_tab_background {
-            palette.active_tab_background = value.0;
-        }
-        if let Some(value) = overrides.tab_text_active {
-            palette.tab_text_active = value.0;
-        }
-        if let Some(value) = overrides.tab_text_inactive {
-            palette.tab_text_inactive = value.0;
-        }
-        if let Some(value) = overrides.status_background {
-            palette.status_background = value.0;
-        }
-        palette
     }
 }
 
@@ -854,16 +854,16 @@ mod tests {
         Config::ensure_file(&path, &installation).unwrap();
         assert!(theme.is_file());
         assert_eq!(
-            Config::load(&path).unwrap().0.palette().foreground,
+            Config::load(&path).unwrap().0.palette().on_surface,
             Color32::from_rgb(18, 52, 86)
         );
         fs::write(&theme, "mode='dark'\n[palette]\naccent='#123456'").unwrap();
         Config::ensure_file(&path, &installation).unwrap();
         let palette = Config::load(&path).unwrap().0.palette();
-        assert_eq!(palette.accent, Color32::from_rgb(18, 52, 86));
+        assert_eq!(palette.primary, Color32::from_rgb(18, 52, 86));
         assert_eq!(
-            palette.foreground,
-            Palette::defaults(Theme::Dark).foreground
+            palette.on_surface,
+            Palette::defaults(Theme::Dark).on_surface
         );
         fs::write(&theme, "accent='wrong'").unwrap();
         assert!(Config::load(&path).err().unwrap().contains("theme.toml"));
@@ -1054,11 +1054,11 @@ F8 = 'shell: synth properties | cat'
     fn dark_palette_matches_tab_reference() {
         let dark = Palette::defaults(Theme::Dark);
         let light = Palette::defaults(Theme::Light);
-        assert_eq!(dark.tabs_background, Color32::from_rgb(41, 41, 39));
-        assert_eq!(dark.active_tab_background, Color32::from_rgb(52, 51, 47));
-        assert_eq!(dark.terminal_background, Color32::from_rgb(28, 29, 28));
-        assert_eq!(dark.status_background, Color32::from_rgb(41, 41, 39));
-        assert_ne!(light.tabs_background, dark.tabs_background);
+        assert_eq!(dark.surface_container, Color32::from_rgb(41, 41, 39));
+        assert_eq!(dark.secondary_container, Color32::from_rgb(52, 51, 47));
+        assert_eq!(dark.surface_container_lowest, Color32::from_rgb(28, 29, 28));
+        assert_eq!(dark.surface_container_high, Color32::from_rgb(41, 41, 39));
+        assert_ne!(light.surface_container, dark.surface_container);
     }
 
     #[test]
@@ -1069,58 +1069,68 @@ F8 = 'shell: synth properties | cat'
         .unwrap();
         let dark = config.colors.palette(Theme::Dark);
         let light = config.colors.palette(Theme::Light);
-        assert_eq!(dark.editor_background, Color32::from_rgb(18, 160, 239));
-        assert_eq!(dark.tab_text_inactive, Color32::BLACK);
+        assert_eq!(dark.surface, Color32::from_rgb(18, 160, 239));
+        assert_eq!(dark.on_surface_variant, Color32::BLACK);
         assert_eq!(
-            dark.terminal_background,
-            Palette::defaults(Theme::Dark).terminal_background
+            dark.surface_container_lowest,
+            Palette::defaults(Theme::Dark).surface_container_lowest
         );
-        assert_eq!(light.editor_background, Color32::from_rgb(68, 85, 102));
+        assert_eq!(light.surface, Color32::from_rgb(68, 85, 102));
         assert_eq!(
-            light.tab_text_inactive,
-            Palette::defaults(Theme::Light).tab_text_inactive
+            light.on_surface_variant,
+            Palette::defaults(Theme::Light).on_surface_variant
         );
     }
 
     #[test]
-    fn renamed_color_options_accept_legacy_aliases() {
-        let fields = [
-            ("editor_background", "editor_bg"),
-            ("foreground", "text_fg"),
-            ("selection", "selection_bg"),
-            ("muted_surface", "surface_bg"),
-            ("terminal_background", "terminal_bg"),
-            ("tabs_background", "tab_bar_bg"),
-            ("active_tab_background", "tab_active_bg"),
-            ("tab_text_active", "tab_active_fg"),
-            ("tab_text_inactive", "tab_inactive_fg"),
-            ("status_background", "status_bar_bg"),
+    fn color_roles_accept_legacy_aliases() {
+        let aliases = [
+            ("primary", &["accent"][..]),
+            ("secondary", &["syntax_string"]),
+            ("tertiary", &["syntax_literal"]),
+            ("outline", &["syntax_comment"]),
+            ("primary_container", &["selection_bg", "selection"]),
+            (
+                "secondary_container",
+                &["tab_active_bg", "active_tab_background"],
+            ),
+            (
+                "on_secondary_container",
+                &["tab_active_fg", "tab_text_active"],
+            ),
+            ("surface", &["editor_bg", "editor_background"]),
+            ("on_surface", &["text_fg", "foreground"]),
+            (
+                "on_surface_variant",
+                &["tab_inactive_fg", "tab_text_inactive"],
+            ),
+            (
+                "surface_container_lowest",
+                &["terminal_bg", "terminal_background"],
+            ),
+            ("surface_container_low", &["current_line"]),
+            ("surface_container", &["tab_bar_bg", "tabs_background"]),
+            (
+                "surface_container_high",
+                &["status_bar_bg", "status_background"],
+            ),
+            (
+                "surface_container_highest",
+                &["surface_bg", "muted_surface"],
+            ),
         ];
-        for (legacy, current) in fields {
-            let old = Config::parse(&format!("[colors.dark]\n{legacy} = '#123ABC'"))
-                .unwrap()
-                .palette();
-            let new = Config::parse(&format!("[colors.dark]\n{current} = '#123ABC'"))
-                .unwrap()
-                .palette();
-            assert_eq!(old.editor_background, new.editor_background, "{current}");
-            assert_eq!(old.foreground, new.foreground, "{current}");
-            assert_eq!(old.selection, new.selection, "{current}");
-            assert_eq!(old.muted_surface, new.muted_surface, "{current}");
-            assert_eq!(
-                old.terminal_background, new.terminal_background,
-                "{current}"
-            );
-            assert_eq!(old.tabs_background, new.tabs_background, "{current}");
-            assert_eq!(
-                old.active_tab_background, new.active_tab_background,
-                "{current}"
-            );
-            assert_eq!(old.tab_text_active, new.tab_text_active, "{current}");
-            assert_eq!(old.tab_text_inactive, new.tab_text_inactive, "{current}");
-            assert_eq!(old.status_background, new.status_background, "{current}");
-            let both = format!("[colors.dark]\n{legacy} = '#123ABC'\n{current} = '#654321'");
-            assert!(Config::parse(&both).is_err(), "{legacy} and {current}");
+        for (role, legacy_names) in aliases {
+            let current = format!("[colors.dark]\n{role} = '#123ABC'");
+            let palette = Config::parse(&current).unwrap().palette();
+            assert_ne!(palette, Palette::defaults(Theme::Dark), "{role}");
+            for legacy in legacy_names {
+                let old = Config::parse(&format!("[colors.dark]\n{legacy} = '#123ABC'"))
+                    .unwrap()
+                    .palette();
+                assert_eq!(old, palette, "{legacy}");
+                let duplicate = format!("{current}\n{legacy} = '#654321'");
+                assert!(Config::parse(&duplicate).is_err(), "{legacy} and {role}");
+            }
         }
     }
 
@@ -1137,10 +1147,10 @@ F8 = 'shell: synth properties | cat'
         )
         .unwrap()
         .palette();
-        assert_eq!(baseline.editor_background, legacy.editor_background);
-        assert_eq!(baseline.editor_background, recent.editor_background);
-        assert_eq!(baseline.tabs_background, legacy.tabs_background);
-        assert_eq!(baseline.tabs_background, recent.tabs_background);
+        assert_eq!(baseline.surface, legacy.surface);
+        assert_eq!(baseline.surface, recent.surface);
+        assert_eq!(baseline.surface_container, legacy.surface_container);
+        assert_eq!(baseline.surface_container, recent.surface_container);
     }
 
     #[test]
@@ -1155,26 +1165,45 @@ F8 = 'shell: synth properties | cat'
     }
 
     #[test]
-    fn sample_preserves_original_palettes() {
-        let config = Config::parse(include_str!("../config.toml")).unwrap();
-        let dark = config.colors.palette(Theme::Dark);
-        let light = config.colors.palette(Theme::Light);
-        assert_eq!(
-            dark.editor_background,
-            Palette::defaults(Theme::Dark).editor_background
-        );
-        assert_eq!(
-            dark.terminal_background,
-            Palette::defaults(Theme::Dark).terminal_background
-        );
-        assert_eq!(
-            light.editor_background,
-            Palette::defaults(Theme::Light).editor_background
-        );
-        assert_eq!(
-            light.active_tab_background,
-            Palette::defaults(Theme::Light).active_tab_background
-        );
+    fn bundled_theme_preserves_the_default_dark_palette() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::ensure_file(&path, &dir.path().join("synth")).unwrap();
+        let (config, _) = Config::load(&path).unwrap();
+        assert_eq!(config.palette(), Palette::defaults(Theme::Dark));
+    }
+
+    #[test]
+    fn theme_file_applies_color_roles_over_mode_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[colors.light]\non_surface = '#010203'").unwrap();
+        fs::write(
+            path.with_file_name("theme.toml"),
+            r##"mode = "light"
+
+[palette]
+primary = "#123456"
+secondary = "#345678"
+tertiary = "#56789A"
+primary_container = "#ABCDEF"
+error = "#9A5678"
+"##,
+        )
+        .unwrap();
+
+        let (config, _) = Config::load(&path).unwrap();
+        let palette = config.palette();
+        let defaults = Palette::defaults(Theme::Light);
+        assert_eq!(palette.primary, Color32::from_rgb(18, 52, 86));
+        assert_eq!(palette.secondary, Color32::from_rgb(52, 86, 120));
+        assert_eq!(palette.tertiary, Color32::from_rgb(86, 120, 154));
+        assert_eq!(palette.surface, defaults.surface);
+        assert_eq!(palette.on_surface, defaults.on_surface);
+        let visuals = palette.visuals(config.editor.theme);
+        assert_eq!(visuals.text_cursor.stroke.color, palette.primary);
+        assert_eq!(visuals.selection.bg_fill, Color32::from_rgb(171, 205, 239));
+        assert_eq!(visuals.error_fg_color, Color32::from_rgb(154, 86, 120));
     }
 
     #[test]
