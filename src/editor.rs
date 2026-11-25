@@ -439,6 +439,14 @@ impl Editor {
                             egui::pos2(gutter_right, ui.clip_rect().bottom()),
                         ),
                     ));
+                    let number_x = gutter_right - 10.0;
+                    if config.interface.show_line_number_divider {
+                        painter.vline(
+                            (number_x + gutter_right) * 0.5,
+                            painter.clip_rect().y_range(),
+                            egui::Stroke::new(1.0_f32, number_color),
+                        );
+                    }
                     let top = ui.clip_rect().top() - output.galley_pos.y;
                     let bottom = ui.clip_rect().bottom() - output.galley_pos.y;
                     let rows = &output.galley.rows;
@@ -462,7 +470,7 @@ impl Editor {
                             && y <= ui.clip_rect().bottom()
                         {
                             painter.text(
-                                egui::pos2(gutter_right - 10.0, y),
+                                egui::pos2(number_x, y),
                                 Align2::RIGHT_TOP,
                                 line,
                                 font.clone(),
@@ -1091,6 +1099,38 @@ mod tests {
                 editor.show(ui, doc, &Config::default(), pane, None);
             });
         });
+    }
+
+    #[test]
+    fn line_number_divider_respects_interface_settings() {
+        for (settings, expected) in [
+            ("show_line_numbers = true", true),
+            (
+                "show_line_numbers = true\nshow_line_number_divider = false",
+                false,
+            ),
+            (
+                "show_line_numbers = false\nshow_line_number_divider = true",
+                false,
+            ),
+        ] {
+            let config: Config = toml::from_str(&format!("[interface]\n{settings}")).unwrap();
+            let ctx = egui::Context::default();
+            let mut editor = Editor::default();
+            let mut documents = Documents::default();
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    editor.show(ui, documents.current_mut(), &config, 0, None);
+                });
+            });
+            let has_divider = output.shapes.iter().any(|clipped| {
+                matches!(&clipped.shape, egui::Shape::LineSegment { points, .. }
+                    if points[0].x == points[1].x
+                        && points[0].y == clipped.clip_rect.top()
+                        && points[1].y == clipped.clip_rect.bottom())
+            });
+            assert_eq!(has_divider, expected, "{settings}");
+        }
     }
 
     #[test]

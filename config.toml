@@ -14,6 +14,7 @@ recover_unsaved_documents = true # keep local drafts of unsaved edits and offer 
 [interface]
 show_tabs = true
 show_line_numbers = true
+show_line_number_divider = true
 syntax_highlighting = true
 show_status_bar = true
 status_bar_height = 26.0

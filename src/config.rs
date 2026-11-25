@@ -396,6 +396,7 @@ pub struct Interface {
     pub show_tabs: bool,
     #[serde(alias = "enable_line_numbers")]
     pub show_line_numbers: bool,
+    pub show_line_number_divider: bool,
     #[serde(alias = "enable_syntax_highlighting")]
     pub syntax_highlighting: bool,
     #[serde(alias = "enable_status_bar")]
@@ -419,6 +420,7 @@ impl Default for Interface {
         Self {
             show_tabs: false,
             show_line_numbers: false,
+            show_line_number_divider: true,
             syntax_highlighting: false,
             show_status_bar: false,
             status_bar_height: 26.0,
@@ -839,6 +841,7 @@ mod tests {
         ).unwrap();
         assert!(config.interface.show_tabs);
         assert!(config.interface.show_line_numbers);
+        assert!(config.interface.show_line_number_divider);
         assert!(config.interface.syntax_highlighting);
         assert!(config.interface.show_status_bar);
     }
